@@ -6,31 +6,68 @@ from typing import Any
 import pandas as pd
 import requests
 import streamlit as st
+import altair as alt
 
 from pipeline.config import RAW_DIR, CURATED_DIR, City
 from pipeline.ingest import ingest_cities
 from pipeline.transform import build_curated, build_daily_aggregates
-from pipeline.dq import run_dq
 
 
 # ----------------------------
-# Helpers
+# Temp helpers (unit toggle)
 # ----------------------------
-def c_to_f(x: Any) -> float | None:
-    try:
-        return (float(x) * 9 / 5) + 32
-    except Exception:
-        return None
+def c_to_f(c: float) -> float:
+    return (c * 9.0 / 5.0) + 32.0
 
 
-def safe_dt(series: pd.Series) -> pd.Series:
-    return pd.to_datetime(series, errors="coerce")
+def format_temp(celsius: float | None, unit: str) -> str:
+    if celsius is None or pd.isna(celsius):
+        return "—"
+    c = float(celsius)
+    f = c_to_f(c)
+
+    if unit == "°C":
+        return f"{c:.1f} °C"
+    if unit == "°F":
+        return f"{f:.1f} °F"
+    return f"{c:.1f} °C / {f:.1f} °F"
 
 
-def format_city_option(x: dict[str, Any]) -> str:
-    name = x.get("name") or ""
-    state = x.get("state") or ""
-    return f"{name}, {state}".strip().rstrip(",")
+def add_temp_cols(df: pd.DataFrame, cols: list[str], unit: str) -> pd.DataFrame:
+    """
+    Adds converted columns for charting:
+    - if unit == °C -> keep original cols
+    - if unit == °F -> add *_u columns in F
+    - if unit == °C + °F -> keep original and add *_f columns in F
+    """
+    out = df.copy()
+    if unit == "°C":
+        for c in cols:
+            if c in out.columns:
+                out[f"{c}_u"] = out[c]
+        return out
+
+    if unit == "°F":
+        for c in cols:
+            if c in out.columns:
+                out[f"{c}_u"] = out[c].apply(lambda x: c_to_f(float(x)) if pd.notna(x) else None)
+        return out
+
+    # °C + °F
+    for c in cols:
+        if c in out.columns:
+            out[f"{c}_u"] = out[c]  # still plot Celsius by default
+            out[f"{c}_f"] = out[c].apply(lambda x: c_to_f(float(x)) if pd.notna(x) else None)
+    return out
+
+
+# ----------------------------
+# Generic helpers
+# ----------------------------
+def safe_datetime_series(df: pd.DataFrame, col: str) -> pd.Series:
+    if col not in df.columns:
+        return pd.to_datetime(pd.Series([], dtype="datetime64[ns]"))
+    return pd.to_datetime(df[col], errors="coerce")
 
 
 @st.cache_data(ttl=3600)
@@ -61,53 +98,41 @@ def geocode_us_cities(query: str, limit: int = 10) -> list[dict[str, Any]]:
     return cleaned
 
 
-def pick_city_ui(
+def format_city_option(x: dict[str, Any]) -> str:
+    name = x.get("name") or ""
+    state = x.get("state") or ""
+    return f"{name}, {state}".strip().rstrip(",")
+
+
+def city_filter_ui(
     df: pd.DataFrame,
     *,
-    key: str,
-    label: str,
+    key_prefix: str,
     default_city: str | None = None,
+    label: str = "Select city",
 ) -> tuple[pd.DataFrame, str | None]:
-    if df is None or df.empty or "city" not in df.columns:
-        st.info("No city data available yet.")
+    if "city" not in df.columns:
+        st.info("No 'city' column found in data.")
         return df, None
 
     cities = sorted(df["city"].dropna().unique().tolist())
     if not cities:
-        st.info("No city data available yet.")
+        st.info("No city data available.")
         return df, None
 
-    idx = 0
+    default_idx = 0
     if default_city and default_city in cities:
-        idx = cities.index(default_city)
+        default_idx = cities.index(default_city)
 
-    selected = st.selectbox(label, options=cities, index=idx, key=key)
-    return df[df["city"] == selected].copy(), selected
+    selected_city = st.selectbox(
+        label,
+        options=cities,
+        index=default_idx,
+        key=f"{key_prefix}_city_select",
+    )
 
-
-def metric_temp(label: str, value_c: Any, unit_mode: str) -> tuple[str, str]:
-    if value_c is None or (isinstance(value_c, float) and pd.isna(value_c)):
-        return label, "NA"
-
-    try:
-        v = float(value_c)
-    except Exception:
-        return label, str(value_c)
-
-    if unit_mode == "Fahrenheit (°F)":
-        vf = c_to_f(v)
-        return label, f"{vf:.1f} °F"
-    if unit_mode == "Both (°C + °F)":
-        vf = c_to_f(v)
-        return label, f"{v:.1f} °C | {vf:.1f} °F" if vf is not None else f"{v:.1f} °C"
-    return label, f"{v:.1f} °C"
-
-
-def display_temp_series(df: pd.DataFrame, col: str, unit_mode: str) -> pd.Series:
-    s = pd.to_numeric(df[col], errors="coerce")
-    if unit_mode == "Fahrenheit (°F)":
-        return (s * 9 / 5) + 32
-    return s
+    st.info(f"Showing data for: {selected_city}")
+    return df[df["city"] == selected_city].copy(), selected_city
 
 
 # ----------------------------
@@ -115,35 +140,30 @@ def display_temp_series(df: pd.DataFrame, col: str, unit_mode: str) -> pd.Series
 # ----------------------------
 st.set_page_config(page_title="Weather Data Pipeline", layout="wide")
 
+# Sidebar: unit toggle (keep UI clean)
+st.sidebar.markdown("### Temperature unit")
+temp_unit = st.sidebar.radio(
+    "Display temperature as",
+    options=["°C", "°F", "°C + °F"],
+    index=2,  # default = both
+)
+
 st.title("Weather Data Engineering Project")
-st.caption("Open-Meteo forecast ingestion → curated parquet → dashboard")
+st.caption("Open-Meteo ingestion → curated parquet → dashboard")
 
 hourly_path = CURATED_DIR / "weather_hourly.parquet"
 daily_path = CURATED_DIR / "weather_daily.parquet"
 
-if "last_city_name" not in st.session_state:
-    st.session_state.last_city_name = None
-
-# Sidebar controls
-st.sidebar.header("Display")
-unit_mode = st.sidebar.radio(
-    "Temperature units",
-    ["Celsius (°C)", "Fahrenheit (°F)", "Both (°C + °F)"],
-    index=2,
-    key="unit_mode",
-)
-show_tables = st.sidebar.checkbox("Show raw tables", value=True, key="show_tables")
-
-# ----------------------------
-# Top: Pipeline + Status
-# ----------------------------
 col1, col2 = st.columns(2)
 
+# ----------------------------
+# Left: Search + Run (Step 1 + Step 2)
+# ----------------------------
 with col1:
     st.subheader("Pipeline")
 
     st.markdown("### Search a US city")
-    city_query = st.text_input("Type a city name (example: Springfield)", value="", key="city_query")
+    city_query = st.text_input("Type a city name (example: Springfield)", value="")
 
     matches: list[dict[str, Any]] = []
     if city_query.strip():
@@ -163,7 +183,7 @@ with col1:
             )
             selected_city = next(m for m in matches if format_city_option(m) == selected_label)
 
-            st.caption("Selected city details")
+            st.caption("Selected city details (for verification)")
             st.write(
                 {
                     "city": selected_city["name"],
@@ -178,25 +198,24 @@ with col1:
     st.divider()
 
     clear_old = st.checkbox(
-        "Clear old curated parquet before run",
+        "Clear old curated parquet before run (recommended)",
         value=True,
         key="clear_old",
-        help="Keeps the dashboard focused on the selected city.",
     )
 
     if st.button("Run pipeline now", key="run_btn"):
         if selected_city is None:
             st.error("Please search and select a city first.")
         else:
-            city_name = f"{selected_city['name']}, {selected_city['state']}".strip().rstrip(",")
+            # Step 2: Run pipeline only for selected city
             city_obj = City(
-                name=city_name,
+                name=f"{selected_city['name']}, {selected_city['state']}".rstrip(", "),
                 lat=float(selected_city["lat"]),
                 lon=float(selected_city["lon"]),
             )
+            cities_to_run = [city_obj]
 
-            st.session_state.last_city_name = city_obj.name
-            st.info(f"Running pipeline for: {city_obj.name}")
+            st.info(f"Running pipeline only for: {city_obj.name} ({city_obj.lat}, {city_obj.lon})")
 
             if clear_old:
                 try:
@@ -207,24 +226,20 @@ with col1:
                 except Exception as e:
                     st.warning(f"Could not delete old curated files: {e}")
 
-            with st.spinner("Ingesting forecast data..."):
-                raw_files = ingest_cities([city_obj], RAW_DIR)
+            with st.spinner("Ingesting weather data..."):
+                raw_files = ingest_cities(cities_to_run, RAW_DIR)
 
-            with st.spinner("Building curated parquet..."):
+            with st.spinner("Transforming to curated parquet..."):
                 curated_hourly = build_curated(raw_files, CURATED_DIR)
                 curated_daily = build_daily_aggregates(curated_hourly, CURATED_DIR)
 
-            # Keep DQ in the pipeline (optional), but do not show in UI
-            try:
-                with st.spinner("Running checks..."):
-                    _ = run_dq(curated_hourly)
-            except Exception:
-                pass
-
             st.success("Pipeline completed")
-            st.caption("Curated output")
+            st.write("Curated files:")
             st.code(f"{curated_hourly}\n{curated_daily}")
 
+# ----------------------------
+# Right: Status
+# ----------------------------
 with col2:
     st.subheader("Status")
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -232,215 +247,179 @@ with col2:
 
     if hourly_path.exists():
         dfh_status = pd.read_parquet(hourly_path)
-        st.write("Hourly rows:", len(dfh_status))
-        if "time" in dfh_status.columns:
-            ts = safe_dt(dfh_status["time"])
-            if len(ts) > 0:
-                st.write("Latest timestamp:", str(ts.max()))
+        st.write("Hourly parquet rows:", len(dfh_status))
+        ts = safe_datetime_series(dfh_status, "time")
+        if len(ts) > 0:
+            st.write("Latest timestamp:", str(ts.max()))
     else:
         st.info("No curated data yet. Run the pipeline.")
 
 st.divider()
 
 # ----------------------------
-# Read data once
+# Tabs: Daily + Hourly (Step 3 already done, keep style)
+# Now: add area-fill temp chart + precip line chart
 # ----------------------------
-dfh_all: pd.DataFrame | None = None
-dfd_all: pd.DataFrame | None = None
+tab1, tab2 = st.tabs(["Daily forecast", "Hourly forecast"])
 
-if hourly_path.exists():
-    dfh_all = pd.read_parquet(hourly_path)
+with tab1:
+    if daily_path.exists():
+        dfd = pd.read_parquet(daily_path)
+        dfd, selected_name = city_filter_ui(dfd, key_prefix="daily", label="Select city for daily view")
 
-if daily_path.exists():
-    dfd_all = pd.read_parquet(daily_path)
+        if "date" in dfd.columns:
+            dfd = dfd.sort_values("date")
 
-# ----------------------------
-# Tabs
-# ----------------------------
-tab_daily, tab_hourly = st.tabs(["Daily forecast", "Hourly forecast"])
-
-with tab_daily:
-    if dfd_all is None or dfd_all.empty:
-        st.info("Daily forecast not available yet. Run the pipeline.")
-    else:
-        dfd_city, selected_city_name = pick_city_ui(
-            dfd_all,
-            key="daily_city_select",
-            label="Select city",
-            default_city=st.session_state.last_city_name,
-        )
-
-        if selected_city_name:
-            st.info(f"Showing data for: {selected_city_name}")
-
-        # Sort by date
-        if "date" in dfd_city.columns:
-            dfd_city["date_dt"] = safe_dt(dfd_city["date"])
-            dfd_city = dfd_city.sort_values("date_dt")
-
-        # Latest day metrics
-        last_row = dfd_city.tail(1)
+        # Metrics (with units)
+        last_row = dfd.tail(1)
         if len(last_row) == 1:
             r = last_row.iloc[0]
             m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Max temp (latest day)", format_temp(r.get("temp_max"), temp_unit))
+            m2.metric("Min temp (latest day)", format_temp(r.get("temp_min"), temp_unit))
+            m3.metric("Avg temp (latest day)", format_temp(r.get("temp_avg"), temp_unit))
+            m4.metric("Precip (latest day)", f"{float(r.get('precip_sum', 0.0)):.1f}")
 
-            if "temp_max" in dfd_city.columns:
-                lbl, val = metric_temp("Max temp (latest day)", r.get("temp_max"), unit_mode)
-                m1.metric(lbl, val)
+        # Prepare temp columns (for charts)
+        temp_cols = [c for c in ["temp_min", "temp_avg", "temp_max"] if c in dfd.columns]
+        dfd = add_temp_cols(dfd, temp_cols, temp_unit)
 
-            if "temp_min" in dfd_city.columns:
-                lbl, val = metric_temp("Min temp (latest day)", r.get("temp_min"), unit_mode)
-                m2.metric(lbl, val)
+        # ---- 1) Temperature trend: line + area fill (Google-like) ----
+        st.markdown("#### Temperature trend (daily)")
+        if "date" in dfd.columns and temp_cols:
+            # Plot average as area fill, plus min/max as lines
+            # Use *_u columns (C or F depending on toggle)
+            plot_cols = {c: f"{c}_u" for c in temp_cols if f"{c}_u" in dfd.columns}
 
-            if "temp_avg" in dfd_city.columns:
-                lbl, val = metric_temp("Avg temp (latest day)", r.get("temp_avg"), unit_mode)
-                m3.metric(lbl, val)
-
-            if "precip_sum" in dfd_city.columns:
-                try:
-                    p = float(r.get("precip_sum", 0.0))
-                    m4.metric("Precip (latest day)", f"{p:.1f} mm")
-                except Exception:
-                    m4.metric("Precip (latest day)", str(r.get("precip_sum", "NA")))
-
-        st.markdown("### 7-day outlook")
-
-        # 7 day tiles
-        tiles = dfd_city.copy()
-        if "date_dt" in tiles.columns:
-            tiles = tiles.sort_values("date_dt").tail(7)
-        else:
-            tiles = tiles.tail(7)
-
-        cols = st.columns(7)
-        for i, (_, row) in enumerate(tiles.reset_index(drop=True).iterrows()):
-            with cols[i]:
-                day_label = "NA"
-                if "date_dt" in tiles.columns and pd.notna(row.get("date_dt")):
-                    day_label = row["date_dt"].strftime("%a")
-
-                st.markdown(f"**{day_label}**")
-
-                if "temp_max" in tiles.columns:
-                    _, v = metric_temp("High", row.get("temp_max"), unit_mode)
-                    st.write(f"High: {v}")
-
-                if "temp_min" in tiles.columns:
-                    _, v = metric_temp("Low", row.get("temp_min"), unit_mode)
-                    st.write(f"Low: {v}")
-
-                if "precip_sum" in tiles.columns:
-                    try:
-                        st.write(f"Precip: {float(row.get('precip_sum', 0.0)):.1f} mm")
-                    except Exception:
-                        st.write(f"Precip: {row.get('precip_sum', 'NA')}")
-
-        st.markdown("### Temperature trend (daily)")
-        temp_cols = [c for c in ["temp_min", "temp_avg", "temp_max"] if c in dfd_city.columns]
-        if "date_dt" in dfd_city.columns and temp_cols:
-            chart_df = pd.DataFrame(index=dfd_city["date_dt"])
-            for c in temp_cols:
-                chart_df[c] = display_temp_series(dfd_city, c, unit_mode)
-            st.line_chart(chart_df)
-
-        st.markdown("### Precipitation (daily)")
-        if "date_dt" in dfd_city.columns and "precip_sum" in dfd_city.columns:
-            precip_df = dfd_city[["date_dt", "precip_sum"]].set_index("date_dt")
-            st.bar_chart(precip_df)
-
-        if show_tables:
-            st.markdown("### Daily table")
-            drop_cols = ["date_dt"]
-            st.dataframe(
-                dfd_city.sort_values("date_dt", ascending=False).drop(columns=drop_cols, errors="ignore"),
-                use_container_width=True,
+            base = alt.Chart(dfd).encode(
+                x=alt.X("date:T", title="Date")
             )
 
-with tab_hourly:
-    if dfh_all is None or dfh_all.empty:
-        st.info("Hourly forecast not available yet. Run the pipeline.")
+            # area fill for avg if present, else use max
+            area_field = plot_cols.get("temp_avg") or plot_cols.get("temp_max")
+            y_title = "Temperature (°C)" if temp_unit == "°C" else "Temperature (°F)" if temp_unit == "°F" else "Temperature (°C)"
+            # If °C+°F we still plot °C by default (cleaner); metrics show both.
+
+            area = base.mark_area(opacity=0.25).encode(
+                y=alt.Y(f"{area_field}:Q", title=y_title)
+            )
+
+            lines = []
+            for label, col in plot_cols.items():
+                lines.append(
+                    base.mark_line().encode(
+                        y=alt.Y(f"{col}:Q"),
+                        tooltip=["date:T", alt.Tooltip(f"{col}:Q", title=label)],
+                    )
+                )
+
+            chart = area
+            for ln in lines:
+                chart = chart + ln
+
+            st.altair_chart(chart.interactive(), use_container_width=True)
+        else:
+            st.info("Temperature fields not found in daily data.")
+
+        # ---- 2) Precipitation: line chart (requested) ----
+        st.markdown("#### Precipitation (daily)")
+        if "date" in dfd.columns and "precip_sum" in dfd.columns:
+            precip_line = (
+                alt.Chart(dfd)
+                .mark_line()
+                .encode(
+                    x=alt.X("date:T", title="Date"),
+                    y=alt.Y("precip_sum:Q", title="Precipitation"),
+                    tooltip=["date:T", alt.Tooltip("precip_sum:Q", title="precip_sum")],
+                )
+            )
+            st.altair_chart(precip_line.interactive(), use_container_width=True)
+        else:
+            st.info("Precipitation field not found in daily data.")
+
+        st.markdown("#### Daily table")
+        st.dataframe(dfd.sort_values("date", ascending=False), use_container_width=True)
+
     else:
-        dfh_city, selected_city_name = pick_city_ui(
-            dfh_all,
-            key="hourly_city_select",
-            label="Select city",
-            default_city=st.session_state.last_city_name,
-        )
+        st.info("Daily aggregates not created yet. Run the pipeline.")
 
-        if selected_city_name:
-            st.info(f"Showing data for: {selected_city_name}")
+with tab2:
+    if hourly_path.exists():
+        dfh = pd.read_parquet(hourly_path)
+        dfh, selected_name = city_filter_ui(dfh, key_prefix="hourly", label="Select city for hourly view")
 
-        # Prepare time
-        if "time" in dfh_city.columns:
-            dfh_city["time_dt"] = safe_dt(dfh_city["time"])
-            dfh_city = dfh_city.sort_values("time_dt")
+        dfh["time_dt"] = safe_datetime_series(dfh, "time")
+        dfh = dfh.sort_values("time_dt")
 
-        # "Now" style card from latest row
-        latest = dfh_city.tail(1)
-        if len(latest) == 1:
-            r = latest.iloc[0]
-            c1, c2, c3, c4 = st.columns(4)
-
-            if "temperature_2m" in dfh_city.columns:
-                lbl, val = metric_temp("Current temp", r.get("temperature_2m"), unit_mode)
-                c1.metric(lbl, val)
-
-            if "relative_humidity_2m" in dfh_city.columns:
-                try:
-                    c2.metric("Humidity", f"{float(r.get('relative_humidity_2m')):.0f}%")
-                except Exception:
-                    c2.metric("Humidity", str(r.get("relative_humidity_2m", "NA")))
-
-            if "windspeed_10m" in dfh_city.columns:
-                try:
-                    c3.metric("Wind", f"{float(r.get('windspeed_10m')):.1f} km/h")
-                except Exception:
-                    c3.metric("Wind", str(r.get("windspeed_10m", "NA")))
-
-            if "precipitation" in dfh_city.columns:
-                try:
-                    c4.metric("Precip", f"{float(r.get('precipitation')):.2f} mm")
-                except Exception:
-                    c4.metric("Precip", str(r.get("precipitation", "NA")))
-
-        st.markdown("### Hourly view")
-        view = st.radio(
-            "View",
-            ["Temperature", "Precipitation", "Wind"],
-            horizontal=True,
-            key="hourly_view",
-        )
-
-        if "time_dt" not in dfh_city.columns:
-            st.info("No time column available to plot hourly charts.")
-        else:
-            plot_df = dfh_city.set_index("time_dt")
-
-            if view == "Temperature":
-                if "temperature_2m" in plot_df.columns:
-                    tmp = display_temp_series(dfh_city, "temperature_2m", unit_mode)
-                    temp_plot = pd.DataFrame({"temperature_2m": tmp.values}, index=plot_df.index)
-                    st.line_chart(temp_plot)
-                else:
-                    st.info("temperature_2m not available in hourly data.")
-
-            elif view == "Precipitation":
-                if "precipitation" in plot_df.columns:
-                    st.bar_chart(plot_df[["precipitation"]])
-                else:
-                    st.info("precipitation not available in hourly data.")
-
+        # Convert hourly temperature if needed
+        if "temperature_2m" in dfh.columns:
+            if temp_unit == "°F":
+                dfh["temperature_u"] = dfh["temperature_2m"].apply(lambda x: c_to_f(float(x)) if pd.notna(x) else None)
+                y_title = "Temperature (°F)"
+            elif temp_unit == "°C":
+                dfh["temperature_u"] = dfh["temperature_2m"]
+                y_title = "Temperature (°C)"
             else:
-                if "windspeed_10m" in plot_df.columns:
-                    st.line_chart(plot_df[["windspeed_10m"]])
-                else:
-                    st.info("windspeed_10m not available in hourly data.")
+                # plot °C for chart; metrics can show both (keeps chart readable)
+                dfh["temperature_u"] = dfh["temperature_2m"]
+                y_title = "Temperature (°C)"
+        else:
+            y_title = "Temperature"
 
-        if show_tables:
-            st.markdown("### Hourly table (latest 200 rows)")
-            st.dataframe(
-                dfh_city.sort_values("time_dt", ascending=False)
-                .head(200)
-                .drop(columns=["time_dt"], errors="ignore"),
-                use_container_width=True,
+        st.markdown("#### Temperature (hourly)")
+        if "time_dt" in dfh.columns and "temperature_u" in dfh.columns:
+            temp_chart = (
+                alt.Chart(dfh)
+                .mark_area(opacity=0.25)
+                .encode(
+                    x=alt.X("time_dt:T", title="Time"),
+                    y=alt.Y("temperature_u:Q", title=y_title),
+                    tooltip=["time_dt:T", alt.Tooltip("temperature_u:Q", title="temp")],
+                )
+                + alt.Chart(dfh)
+                .mark_line()
+                .encode(
+                    x="time_dt:T",
+                    y="temperature_u:Q",
+                )
             )
+            st.altair_chart(temp_chart.interactive(), use_container_width=True)
+        else:
+            st.info("Hourly temperature fields not found.")
+
+        st.markdown("#### Precipitation (hourly) - line")
+        if "time_dt" in dfh.columns and "precipitation" in dfh.columns:
+            pr_line = (
+                alt.Chart(dfh)
+                .mark_line()
+                .encode(
+                    x=alt.X("time_dt:T", title="Time"),
+                    y=alt.Y("precipitation:Q", title="Precipitation"),
+                    tooltip=["time_dt:T", alt.Tooltip("precipitation:Q", title="precip")],
+                )
+            )
+            st.altair_chart(pr_line.interactive(), use_container_width=True)
+        else:
+            st.info("Hourly precipitation field not found.")
+
+        st.markdown("#### Wind (hourly)")
+        if "time_dt" in dfh.columns and "windspeed_10m" in dfh.columns:
+            wind_line = (
+                alt.Chart(dfh)
+                .mark_line()
+                .encode(
+                    x=alt.X("time_dt:T", title="Time"),
+                    y=alt.Y("windspeed_10m:Q", title="Wind speed"),
+                    tooltip=["time_dt:T", alt.Tooltip("windspeed_10m:Q", title="wind")],
+                )
+            )
+            st.altair_chart(wind_line.interactive(), use_container_width=True)
+
+        st.markdown("#### Hourly table (latest 200 rows)")
+        st.dataframe(
+            dfh.sort_values("time_dt", ascending=False).head(200).drop(columns=["time_dt"], errors="ignore"),
+            use_container_width=True,
+        )
+
+    else:
+        st.info("Hourly data not created yet. Run the pipeline.")
