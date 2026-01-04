@@ -10,43 +10,11 @@ import streamlit as st
 from pipeline.config import RAW_DIR, CURATED_DIR, City
 from pipeline.ingest import ingest_cities
 from pipeline.transform import build_curated, build_daily_aggregates
-from pipeline.dq import run_dq
 
 
 # ----------------------------
 # Helpers
 # ----------------------------
-def city_filter_ui(
-    df: pd.DataFrame,
-    *,
-    key_prefix: str,
-    default_city: str | None = None,
-    label: str = "Filter results by city",
-) -> pd.DataFrame:
-    if "city" not in df.columns:
-        st.info("No 'city' column found in data.")
-        return df
-
-    cities = sorted(df["city"].dropna().unique().tolist())
-    if not cities:
-        st.info("No city data available.")
-        return df
-
-    default_idx = 0
-    if default_city and default_city in cities:
-        default_idx = cities.index(default_city)
-
-    selected_city = st.selectbox(
-        label,
-        options=cities,
-        index=default_idx,
-        key=f"{key_prefix}_city_select",
-    )
-
-    st.info(f"Showing data for: {selected_city}")
-    return df[df["city"] == selected_city].copy()
-
-
 @st.cache_data(ttl=3600)
 def geocode_us_cities(query: str, limit: int = 10) -> list[dict[str, Any]]:
     query = query.strip()
@@ -82,10 +50,43 @@ def format_city_option(x: dict[str, Any]) -> str:
 
 
 def safe_datetime_series(df: pd.DataFrame, col: str) -> pd.Series:
-    # converts to datetime without crashing UI
     if col not in df.columns:
         return pd.to_datetime(pd.Series([], dtype="datetime64[ns]"))
     return pd.to_datetime(df[col], errors="coerce")
+
+
+def pick_city_from_df(
+    df: pd.DataFrame,
+    *,
+    key: str,
+    label: str,
+    preferred_city: str | None = None,
+) -> tuple[pd.DataFrame, str | None]:
+    """
+    If df contains multiple cities, show a selectbox and return filtered df.
+    If only one city exists, skip selectbox and return df as-is.
+    """
+    if "city" not in df.columns:
+        st.info("No 'city' column found in data.")
+        return df, None
+
+    cities = sorted(df["city"].dropna().unique().tolist())
+    if not cities:
+        st.info("No city data available.")
+        return df, None
+
+    if len(cities) == 1:
+        chosen = cities[0]
+        st.info(f"Showing data for: {chosen}")
+        return df[df["city"] == chosen].copy(), chosen
+
+    default_idx = 0
+    if preferred_city and preferred_city in cities:
+        default_idx = cities.index(preferred_city)
+
+    chosen = st.selectbox(label, options=cities, index=default_idx, key=key)
+    st.info(f"Showing data for: {chosen}")
+    return df[df["city"] == chosen].copy(), chosen
 
 
 # ----------------------------
@@ -102,7 +103,7 @@ daily_path = CURATED_DIR / "weather_daily.parquet"
 col1, col2 = st.columns(2)
 
 # ----------------------------
-# Left: Search + Run
+# Left: Search + Run (Step 1 + Step 2)
 # ----------------------------
 with col1:
     st.subheader("Pipeline")
@@ -119,14 +120,16 @@ with col1:
             matches = []
 
     selected_city: dict[str, Any] | None = None
+    selected_city_label: str | None = None
+
     if city_query.strip():
         if matches:
-            selected_label = st.selectbox(
+            selected_city_label = st.selectbox(
                 "Select the exact city",
                 options=[format_city_option(m) for m in matches],
                 key="city_pick",
             )
-            selected_city = next(m for m in matches if format_city_option(m) == selected_label)
+            selected_city = next(m for m in matches if format_city_option(m) == selected_city_label)
 
             st.caption("Selected city details (for verification)")
             st.write(
@@ -142,13 +145,6 @@ with col1:
 
     st.divider()
 
-    run_for_selected = st.checkbox(
-        "Run pipeline for selected city",
-        value=True,
-        disabled=(selected_city is None),
-        key="run_for_selected",
-    )
-
     clear_old = st.checkbox(
         "Clear old curated parquet before run (recommended)",
         value=True,
@@ -159,7 +155,7 @@ with col1:
         if selected_city is None:
             st.error("Please search and select a city first.")
         else:
-            # Step 2: Build a single-city list for ingest
+            # Step 2: run only for selected city
             city_obj = City(
                 name=f"{selected_city['name']}, {selected_city['state']}".rstrip(", "),
                 lat=float(selected_city["lat"]),
@@ -167,7 +163,7 @@ with col1:
             )
             cities_to_run = [city_obj]
 
-            st.info(f"Running pipeline only for: {city_obj.name} ({city_obj.lat}, {city_obj.lon})")
+            st.success(f"Running pipeline only for: {city_obj.name}")
 
             if clear_old:
                 try:
@@ -185,16 +181,10 @@ with col1:
                 curated_hourly = build_curated(raw_files, CURATED_DIR)
                 curated_daily = build_daily_aggregates(curated_hourly, CURATED_DIR)
 
-            with st.spinner("Running data quality checks..."):
-                dq_results = run_dq(curated_hourly)
-
             st.success("Pipeline completed")
-            st.write("Curated files:")
-            st.code(f"{curated_hourly}\n{curated_daily}")
 
-            # st.write("DQ Results")
-            # for r in dq_results:
-            #     (st.success if r.ok else st.error)(r.message)
+            with st.expander("Pipeline output files"):
+                st.code(f"{curated_hourly}\n{curated_daily}")
 
 # ----------------------------
 # Right: Status
@@ -216,37 +206,46 @@ with col2:
 st.divider()
 
 # ----------------------------
-# Tabs: Daily + Hourly
+# Tabs: Daily + Hourly (Step 3 already done)
 # ----------------------------
 tab1, tab2 = st.tabs(["Daily forecast", "Hourly forecast"])
 
 with tab1:
     if daily_path.exists():
-        dfd = pd.read_parquet(daily_path)
+        dfd_all = pd.read_parquet(daily_path).copy()
 
-        # Filter UI (in case you later store multiple cities)
-        dfd = city_filter_ui(dfd, key_prefix="daily", label="Select city for daily view")
+        # Prefer the just-searched city (if present in parquet)
+        preferred = None
+        if "city" in dfd_all.columns:
+            if "city_pick" in st.session_state:
+                preferred = st.session_state.get("city_pick")
 
-        # ---- Step 3 UI: metrics + charts ----
-        # Ensure date sorted
+        dfd, chosen_city = pick_city_from_df(
+            dfd_all,
+            key="daily_city_selectbox",
+            label="Select city for daily view",
+            preferred_city=preferred,
+        )
+
+        # ensure date sorted
         if "date" in dfd.columns:
+            dfd["date"] = pd.to_datetime(dfd["date"], errors="coerce")
             dfd = dfd.sort_values("date")
 
-        # Pick the next available day (last row after sort)
+        # metrics from latest row
         last_row = dfd.tail(1)
         if len(last_row) == 1:
             r = last_row.iloc[0]
             m1, m2, m3, m4 = st.columns(4)
             if "temp_max" in dfd.columns:
-                m1.metric("Max temp (latest day)", f"{r.get('temp_max', '')}")
+                m1.metric("Max temp (latest day)", f"{float(r.get('temp_max')):.1f}")
             if "temp_min" in dfd.columns:
-                m2.metric("Min temp (latest day)", f"{r.get('temp_min', '')}")
+                m2.metric("Min temp (latest day)", f"{float(r.get('temp_min')):.1f}")
             if "temp_avg" in dfd.columns:
-                m3.metric("Avg temp (latest day)", f"{r.get('temp_avg', '')}")
+                m3.metric("Avg temp (latest day)", f"{float(r.get('temp_avg')):.1f}")
             if "precip_sum" in dfd.columns:
-                m4.metric("Precip (latest day)", f"{r.get('precip_sum', '')}")
+                m4.metric("Precip (latest day)", f"{float(r.get('precip_sum')):.1f}")
 
-        # Charts
         st.markdown("#### Temperature trend (daily)")
         temp_cols = [c for c in ["temp_min", "temp_avg", "temp_max"] if c in dfd.columns]
         if "date" in dfd.columns and temp_cols:
@@ -258,19 +257,27 @@ with tab1:
             precip_df = dfd[["date", "precip_sum"]].set_index("date")
             st.bar_chart(precip_df)
 
-        st.markdown("#### Daily table")
-        st.dataframe(dfd.sort_values("date", ascending=False), use_container_width=True)
+        with st.expander("Daily table"):
+            st.dataframe(dfd.sort_values("date", ascending=False), use_container_width=True)
     else:
         st.info("Daily aggregates not created yet. Run the pipeline.")
 
 with tab2:
     if hourly_path.exists():
-        dfh = pd.read_parquet(hourly_path)
+        dfh_all = pd.read_parquet(hourly_path).copy()
 
-        # Filter UI (in case you later store multiple cities)
-        dfh = city_filter_ui(dfh, key_prefix="hourly", label="Select city for hourly view")
+        preferred = None
+        if "city" in dfh_all.columns:
+            if "city_pick" in st.session_state:
+                preferred = st.session_state.get("city_pick")
 
-        # ---- Step 3 UI: charts ----
+        dfh, chosen_city = pick_city_from_df(
+            dfh_all,
+            key="hourly_city_selectbox",
+            label="Select city for hourly view",
+            preferred_city=preferred,
+        )
+
         dfh["time_dt"] = safe_datetime_series(dfh, "time")
         dfh = dfh.sort_values("time_dt")
 
@@ -289,11 +296,12 @@ with tab2:
             pr_h = dfh[["time_dt", "precipitation"]].set_index("time_dt")
             st.bar_chart(pr_h)
 
-        st.markdown("#### Hourly table (latest 200 rows)")
-        # Keep it readable: latest first
-        st.dataframe(
-            dfh.sort_values("time_dt", ascending=False).head(200).drop(columns=["time_dt"], errors="ignore"),
-            use_container_width=True,
-        )
+        with st.expander("Hourly table (latest 200 rows)"):
+            st.dataframe(
+                dfh.sort_values("time_dt", ascending=False)
+                .head(200)
+                .drop(columns=["time_dt"], errors="ignore"),
+                use_container_width=True,
+            )
     else:
         st.info("Hourly data not created yet. Run the pipeline.")
