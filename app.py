@@ -13,18 +13,30 @@ from pipeline.transform import build_curated, build_daily_aggregates
 from pipeline.dq import run_dq
 
 
-def city_filter_ui(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Adds a city selector and returns filtered dataframe
-    """
-    cities = sorted(df["city"].unique().tolist())
+def city_filter_ui(
+    df: pd.DataFrame,
+    *,
+    key_prefix: str,
+    default_city: str | None = None,
+) -> pd.DataFrame:
+    cities = sorted(df["city"].dropna().unique().tolist())
+    if not cities:
+        st.info("No city data available.")
+        return df
+
+    default_idx = 0
+    if default_city and default_city in cities:
+        default_idx = cities.index(default_city)
+
     selected_city = st.selectbox(
         "Filter results by city",
         options=cities,
-        index=0,
+        index=default_idx,
+        key=f"{key_prefix}_city_select",
     )
-    st.info(f"Showing data for: **{selected_city}**")
-    return df[df["city"] == selected_city]
+
+    st.info(f"Showing data for: {selected_city}")
+    return df[df["city"] == selected_city].copy()
 
 
 st.set_page_config(page_title="Weather Data Pipeline", layout="wide")
@@ -55,7 +67,7 @@ def geocode_us_cities(query: str, limit: int = 10) -> list[dict[str, Any]]:
     results = data.get("results") or []
     us_results = [x for x in results if x.get("country_code") == "US"]
 
-    cleaned = []
+    cleaned: list[dict[str, Any]] = []
     for x in us_results:
         cleaned.append(
             {
@@ -114,9 +126,6 @@ with col1:
 
     st.divider()
 
-    # st.markdown("### Default cities (current config)")
-    # st.write([c.name for c in CITIES])
-
     # --- Run pipeline ---
     run_for_selected = st.checkbox(
         "Run pipeline for selected city (Step 2 will wire this into ingest)",
@@ -127,7 +136,6 @@ with col1:
     if st.button("Run pipeline now"):
         # Step 1 behavior:
         # - If selected city exists, we SHOW it and still run current pipeline (Step 2 changes ingest).
-        # - This keeps app working while we build the next step safely.
         if run_for_selected and selected_city is not None:
             st.info(
                 f"Selected city: {selected_city['name']}, {selected_city['state']} "
@@ -159,9 +167,9 @@ with col2:
     st.write(f"Now: {now}")
 
     if hourly_path.exists():
-        dfh = pd.read_parquet(hourly_path)
-        st.write("Hourly parquet rows:", len(dfh))
-        st.write("Latest timestamp:", str(pd.to_datetime(dfh["time"]).max()))
+        dfh_status = pd.read_parquet(hourly_path)
+        st.write("Hourly parquet rows:", len(dfh_status))
+        st.write("Latest timestamp:", str(pd.to_datetime(dfh_status["time"]).max()))
     else:
         st.info("No curated data yet. Click 'Run pipeline now'.")
 
@@ -172,7 +180,7 @@ tab1, tab2 = st.tabs(["Daily aggregates", "Hourly sample"])
 with tab1:
     if daily_path.exists():
         dfd = pd.read_parquet(daily_path)
-        dfd = city_filter_ui(dfd)
+        dfd = city_filter_ui(dfd, key_prefix="daily")
 
         st.dataframe(
             dfd.sort_values("date", ascending=False),
@@ -181,11 +189,10 @@ with tab1:
     else:
         st.info("Daily aggregates not created yet.")
 
-
 with tab2:
     if hourly_path.exists():
         dfh = pd.read_parquet(hourly_path)
-        dfh = city_filter_ui(dfh)
+        dfh = city_filter_ui(dfh, key_prefix="hourly")
 
         st.dataframe(
             dfh.sort_values("time", ascending=False).head(200),
