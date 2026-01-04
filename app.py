@@ -192,9 +192,9 @@ with col1:
             st.write("Curated files:")
             st.code(f"{curated_hourly}\n{curated_daily}")
 
-            st.write("DQ Results")
-            for r in dq_results:
-                (st.success if r.ok else st.error)(r.message)
+            # st.write("DQ Results")
+            # for r in dq_results:
+            #     (st.success if r.ok else st.error)(r.message)
 
 # ----------------------------
 # Right: Status
