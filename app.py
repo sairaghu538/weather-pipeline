@@ -99,8 +99,8 @@ with col1:
 
     st.divider()
 
-    st.markdown("### Default cities (current config)")
-    st.write([c.name for c in CITIES])
+    # st.markdown("### Default cities (current config)")
+    # st.write([c.name for c in CITIES])
 
     # --- Run pipeline ---
     run_for_selected = st.checkbox(
