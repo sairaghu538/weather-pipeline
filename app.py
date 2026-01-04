@@ -12,6 +12,21 @@ from pipeline.ingest import ingest_cities
 from pipeline.transform import build_curated, build_daily_aggregates
 from pipeline.dq import run_dq
 
+
+def city_filter_ui(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adds a city selector and returns filtered dataframe
+    """
+    cities = sorted(df["city"].unique().tolist())
+    selected_city = st.selectbox(
+        "Filter results by city",
+        options=cities,
+        index=0,
+    )
+    st.info(f"Showing data for: **{selected_city}**")
+    return df[df["city"] == selected_city]
+
+
 st.set_page_config(page_title="Weather Data Pipeline", layout="wide")
 
 st.title("Weather Data Engineering Project")
@@ -157,16 +172,24 @@ tab1, tab2 = st.tabs(["Daily aggregates", "Hourly sample"])
 with tab1:
     if daily_path.exists():
         dfd = pd.read_parquet(daily_path)
+        dfd = city_filter_ui(dfd)
+
         st.dataframe(
-            dfd.sort_values(["date", "city"], ascending=[False, True]),
+            dfd.sort_values("date", ascending=False),
             use_container_width=True,
         )
     else:
         st.info("Daily aggregates not created yet.")
 
+
 with tab2:
     if hourly_path.exists():
         dfh = pd.read_parquet(hourly_path)
-        st.dataframe(dfh.tail(200), use_container_width=True)
+        dfh = city_filter_ui(dfh)
+
+        st.dataframe(
+            dfh.sort_values("time", ascending=False).head(200),
+            use_container_width=True,
+        )
     else:
         st.info("Hourly data not created yet.")
