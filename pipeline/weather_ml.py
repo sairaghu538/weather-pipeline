@@ -63,6 +63,10 @@ class ForecastResult:
     rows_test: int
     parquet_path: str
 
+    # NEW: for alignment with Open-Meteo reference day
+    noaa_last_date: Optional[str] = None
+    target_date: Optional[str] = None
+
 
 # -----------------------------
 # Helpers: download + cache
@@ -240,7 +244,6 @@ def _parse_dly(text: str, start: date, end: date) -> pd.DataFrame:
         if len(line) < 269:
             continue
 
-        sid = line[0:11]
         year = int(line[11:15])
         month = int(line[15:17])
         element = line[17:21]
@@ -338,7 +341,6 @@ def fetch_daily_history(city: str, days: int) -> Tuple[pd.DataFrame, str, str]:
 
             # Drop rows where we have no temp at all
             df = df.dropna(subset=["min_temp_c", "max_temp_c"], how="all")
-
             df = df.sort_values("date")
 
             if df.empty:
@@ -449,6 +451,20 @@ def predict_next_day_avg_temp(model: LinearRegression, df_feat: pd.DataFrame) ->
 
 def run_city_forecast(city: str, days: int = 30, save_model: bool = True) -> ForecastResult:
     raw_df, station_id, station_name = fetch_daily_history(city, days)
+
+    # NEW: determine target day based on NOAA last observed date, not "today"
+    noaa_last_date: Optional[str] = None
+    target_date: Optional[str] = None
+    if not raw_df.empty and "date" in raw_df.columns:
+        try:
+            noaa_last_dt = pd.to_datetime(raw_df["date"]).max().date()
+            target_dt = (pd.to_datetime(noaa_last_dt) + pd.Timedelta(days=1)).date()
+            noaa_last_date = str(noaa_last_dt)
+            target_date = str(target_dt)
+        except Exception:
+            noaa_last_date = None
+            target_date = None
+
     df_feat = build_features(raw_df)
 
     if len(df_feat) < 10:
@@ -479,6 +495,8 @@ def run_city_forecast(city: str, days: int = 30, save_model: bool = True) -> For
         rows_train=rows_train,
         rows_test=rows_test,
         parquet_path=str(parquet_path),
+        noaa_last_date=noaa_last_date,
+        target_date=target_date,
     )
 
 
