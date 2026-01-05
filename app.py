@@ -228,7 +228,7 @@ temp_unit = st.sidebar.radio(
 
 # Sidebar: ML settings
 st.sidebar.markdown("### ML forecast (NOAA)")
-ml_days = st.sidebar.selectbox("Training window", options=[30, 90], index=0)
+ml_days = st.sidebar.selectbox("Training window", options=[30, 90, 365], index=0)
 ml_auto_run = st.sidebar.checkbox("Auto-run ML when city changes", value=True)
 
 st.title("Weather Data Engineering Project")
