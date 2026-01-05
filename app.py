@@ -101,6 +101,43 @@ def geocode_us_cities(query: str, limit: int = 10) -> list[dict[str, Any]]:
     return cleaned
 
 
+@st.cache_data(ttl=3600)
+def open_meteo_tomorrow_avg_temp(lat: float, lon: float) -> dict[str, Any]:
+    """
+    Returns tomorrow's forecasted average temperature from Open-Meteo (in °C).
+    Output:
+      {"date": "YYYY-MM-DD" | None, "tmean_c": float | None}
+    """
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "daily": "temperature_2m_mean,temperature_2m_max,temperature_2m_min",
+        "timezone": "UTC",
+        "forecast_days": 2,  # today + tomorrow
+    }
+
+    r = requests.get(url, params=params, timeout=20)
+    r.raise_for_status()
+    data = r.json()
+
+    daily = data.get("daily") or {}
+    dates = daily.get("time") or []
+    tmean = daily.get("temperature_2m_mean") or []
+
+    if len(dates) < 2:
+        return {"date": None, "tmean_c": None}
+
+    tmean_c = None
+    if len(tmean) >= 2 and tmean[1] is not None:
+        try:
+            tmean_c = float(tmean[1])
+        except Exception:
+            tmean_c = None
+
+    return {"date": dates[1], "tmean_c": tmean_c}
+
+
 def format_city_option(x: dict[str, Any]) -> str:
     name = x.get("name") or ""
     state = x.get("state") or ""
@@ -330,28 +367,29 @@ with tab1:
         # ML forecast section
         st.markdown("### ML forecast (next day avg temp, NOAA)")
 
-        # NEW: clarify the comparison
-        if latest_openmeteo_date is not None:
-            try:
-                latest_dt = pd.to_datetime(latest_openmeteo_date).date()
-                predicted_for_dt = (pd.to_datetime(latest_dt) + pd.Timedelta(days=1)).date()
-                st.caption(
-                    f"Open-Meteo metrics above are for the latest available day ({latest_dt}). "
-                    f"The ML model predicts the next day average temperature ({predicted_for_dt}) using NOAA station history."
-                )
-            except Exception:
-                st.caption(
-                    "Open-Meteo metrics above are for the latest available day. "
-                    "The ML model below predicts the next day average temperature using NOAA station history."
-                )
-        else:
-            st.caption(
-                "Open-Meteo metrics above are for the latest available day. "
-                "The ML model below predicts the next day average temperature using NOAA station history."
-            )
-
         if selected_name:
             noaa_city_query = normalize_city_for_noaa(selected_name)
+
+            # Use geocoded lat/lon for Open-Meteo tomorrow reference
+            city_lat = None
+            city_lon = None
+            try:
+                # Try to reuse the geocoding endpoint for the selected city label
+                city_matches = geocode_us_cities(selected_name.split(",")[0], limit=15)
+                # pick exact label match if possible
+                chosen = None
+                for m in city_matches:
+                    if format_city_option(m).strip().lower() == selected_name.strip().lower():
+                        chosen = m
+                        break
+                if chosen is None and city_matches:
+                    chosen = city_matches[0]
+                if chosen is not None:
+                    city_lat = float(chosen["lat"])
+                    city_lon = float(chosen["lon"])
+            except Exception:
+                city_lat = None
+                city_lon = None
 
             run_ml = ml_auto_run or st.button("Run ML forecast now", key="ml_run_btn")
 
@@ -360,31 +398,95 @@ with tab1:
                     with st.spinner("Training model and predicting using NOAA daily data..."):
                         ml_out = cached_noaa_forecast(noaa_city_query, ml_days)
 
-                    c_pred = ml_out["predicted_avg_temp_c"]
+                    ml_pred_c = ml_out["predicted_avg_temp_c"]
+                    mae_c = ml_out["test_mae_c"]
+                    rows_total = ml_out["rows_total"]
+                    rows_train = ml_out["rows_train"]
+                    rows_test = ml_out["rows_test"]
+                    station_name = ml_out["station_name"]
 
-                    ml1, ml2, ml3, ml4 = st.columns(4)
-                    ml1.metric("Predicted avg temp (next day)", format_temp(c_pred, temp_unit))
-                    ml2.metric("MAE (°C)", "—" if ml_out["test_mae_c"] is None else f"{ml_out['test_mae_c']:.2f}")
-                    ml3.metric("Rows used", f"{ml_out['rows_total']} (train {ml_out['rows_train']}, test {ml_out['rows_test']})")
-                    ml4.metric("NOAA station", ml_out["station_name"])
+                    # Open-Meteo tomorrow forecast reference (avg)
+                    om_date = None
+                    om_tmean_c = None
+                    if city_lat is not None and city_lon is not None:
+                        try:
+                            om = open_meteo_tomorrow_avg_temp(city_lat, city_lon)
+                            om_date = om.get("date")
+                            om_tmean_c = om.get("tmean_c")
+                        except Exception:
+                            om_date = None
+                            om_tmean_c = None
 
-                    # NEW: show Open-Meteo latest avg next to ML predicted next day (not saying they should match)
-                    if latest_openmeteo_avg_c is not None:
+                    delta_c = None
+                    delta_f = None
+                    if om_tmean_c is not None and ml_pred_c is not None:
+                        try:
+                            delta_c = float(ml_pred_c) - float(om_tmean_c)
+                            delta_f = c_to_f(float(ml_pred_c)) - c_to_f(float(om_tmean_c))
+                        except Exception:
+                            delta_c = None
+                            delta_f = None
+
+                    # Caption: now we are comparing tomorrow vs tomorrow
+                    if om_date:
                         st.caption(
-                            f"For context only: Open-Meteo latest-day avg = {format_temp(latest_openmeteo_avg_c, temp_unit)}. "
-                            f"ML is predicting the next day avg based on NOAA station history."
+                            f"Open-Meteo reference is tomorrow's forecast ({om_date}). "
+                            f"The ML model predicts tomorrow's average temperature using NOAA station history. "
+                            f"Delta compares ML vs Open-Meteo for the same day."
                         )
+                    else:
+                        st.caption(
+                            "The ML model predicts tomorrow's average temperature using NOAA station history. "
+                            "Open-Meteo tomorrow reference was unavailable for comparison."
+                        )
+
+                    ml1, ml2, ml3, ml4, ml5, ml6 = st.columns(6)
+                    ml1.metric("Predicted avg temp (tomorrow, ML)", format_temp(ml_pred_c, temp_unit))
+                    ml2.metric("Open-Meteo avg temp (tomorrow)", format_temp(om_tmean_c, temp_unit))
+
+                    if delta_c is None:
+                        ml3.metric("Delta (ML - Open-Meteo)", "—")
+                    else:
+                        if temp_unit == "°F":
+                            ml3.metric("Delta (ML - Open-Meteo)", f"{delta_f:+.1f} °F")
+                        elif temp_unit == "°C":
+                            ml3.metric("Delta (ML - Open-Meteo)", f"{delta_c:+.1f} °C")
+                        else:
+                            ml3.metric("Delta (ML - Open-Meteo)", f"{delta_c:+.1f} °C / {delta_f:+.1f} °F")
+
+                    ml4.metric("MAE (°C)", "—" if mae_c is None else f"{mae_c:.2f}")
+                    ml5.metric("Rows used", f"{rows_total} (train {rows_train}, test {rows_test})")
+                    ml6.metric("NOAA station", station_name)
+
+                    # Keep the original context note (latest day vs tomorrow)
+                    if latest_openmeteo_date is not None:
+                        try:
+                            latest_dt = pd.to_datetime(latest_openmeteo_date).date()
+                            st.caption(
+                                f"Open-Meteo metrics at the top are the latest available day ({latest_dt}). "
+                                f"ML and Open-Meteo reference above are for tomorrow."
+                            )
+                        except Exception:
+                            st.caption(
+                                "Open-Meteo metrics at the top are the latest available day. "
+                                "ML and Open-Meteo reference above are for tomorrow."
+                            )
 
                     with st.expander("Details"):
                         st.write(
                             {
-                                "city_query": noaa_city_query,
-                                "days_used": ml_out["days_used"],
-                                "station_id": ml_out["station_id"],
-                                "station_name": ml_out["station_name"],
-                                "predicted_avg_temp_c": ml_out["predicted_avg_temp_c"],
-                                "predicted_avg_temp_f": ml_out["predicted_avg_temp_f"],
-                                "parquet_path": ml_out["parquet_path"],
+                                "ui_city": selected_name,
+                                "noaa_city_query": noaa_city_query,
+                                "training_days": ml_out["days_used"],
+                                "noaa_station_id": ml_out["station_id"],
+                                "noaa_station_name": ml_out["station_name"],
+                                "ml_predicted_avg_temp_c": ml_out["predicted_avg_temp_c"],
+                                "ml_predicted_avg_temp_f": ml_out["predicted_avg_temp_f"],
+                                "open_meteo_tomorrow_date": om_date,
+                                "open_meteo_tomorrow_avg_c": om_tmean_c,
+                                "delta_c": delta_c,
+                                "delta_f": delta_f,
+                                "noaa_parquet_path": ml_out["parquet_path"],
                             }
                         )
                 except Exception as e:
