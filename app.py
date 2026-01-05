@@ -12,6 +12,9 @@ from pipeline.config import RAW_DIR, CURATED_DIR, City
 from pipeline.ingest import ingest_cities
 from pipeline.transform import build_curated, build_daily_aggregates
 
+# NEW: NOAA ML forecast
+from pipeline.weather_ml import run_city_forecast
+
 
 # ----------------------------
 # Temp helpers (unit toggle)
@@ -135,6 +138,44 @@ def city_filter_ui(
     return df[df["city"] == selected_city].copy(), selected_city
 
 
+def normalize_city_for_noaa(selected_city_label: str) -> str:
+    """
+    NOAA path uses geopy Nominatim. Give it an unambiguous string.
+    If UI gives "San Jose, California", NOAA geocoder usually accepts it,
+    but adding USA helps.
+    """
+    s = (selected_city_label or "").strip()
+    if not s:
+        return s
+    if "USA" in s.upper() or "UNITED STATES" in s.upper():
+        return s
+    return f"{s}, USA"
+
+
+# ----------------------------
+# NOAA ML cache wrapper
+# ----------------------------
+@st.cache_data(ttl=24 * 60 * 60)
+def cached_noaa_forecast(city_query: str, days: int) -> dict[str, Any]:
+    """
+    Returns a serializable dict (Streamlit cache friendly).
+    """
+    res = run_city_forecast(city_query, days=days, save_model=False)
+    return {
+        "city": res.city,
+        "days_used": res.days_used,
+        "station_id": res.station_id,
+        "station_name": res.station_name,
+        "predicted_avg_temp_c": float(res.predicted_avg_temp_c),
+        "predicted_avg_temp_f": float(res.predicted_avg_temp_f),
+        "test_mae_c": None if res.test_mae_c is None else float(res.test_mae_c),
+        "rows_total": int(res.rows_total),
+        "rows_train": int(res.rows_train),
+        "rows_test": int(res.rows_test),
+        "parquet_path": str(res.parquet_path),
+    }
+
+
 # ----------------------------
 # Page
 # ----------------------------
@@ -147,6 +188,11 @@ temp_unit = st.sidebar.radio(
     options=["°C", "°F", "°C + °F"],
     index=2,  # default = both
 )
+
+# NEW: sidebar ML settings
+st.sidebar.markdown("### ML forecast (NOAA)")
+ml_days = st.sidebar.selectbox("Training window", options=[30, 90], index=0)
+ml_auto_run = st.sidebar.checkbox("Auto-run ML when city changes", value=True)
 
 st.title("Weather Data Engineering Project")
 st.caption("Open-Meteo ingestion → curated parquet → dashboard")
@@ -207,7 +253,6 @@ with col1:
         if selected_city is None:
             st.error("Please search and select a city first.")
         else:
-            # Step 2: Run pipeline only for selected city
             city_obj = City(
                 name=f"{selected_city['name']}, {selected_city['state']}".rstrip(", "),
                 lat=float(selected_city["lat"]),
@@ -257,8 +302,7 @@ with col2:
 st.divider()
 
 # ----------------------------
-# Tabs: Daily + Hourly (Step 3 already done, keep style)
-# Now: add area-fill temp chart + precip line chart
+# Tabs: Daily + Hourly
 # ----------------------------
 tab1, tab2 = st.tabs(["Daily forecast", "Hourly forecast"])
 
@@ -280,25 +324,64 @@ with tab1:
             m3.metric("Avg temp (latest day)", format_temp(r.get("temp_avg"), temp_unit))
             m4.metric("Precip (latest day)", f"{float(r.get('precip_sum', 0.0)):.1f}")
 
+        # NEW: ML forecast card (NOAA)
+        st.markdown("### ML forecast (next day avg temp, NOAA)")
+        if selected_name:
+            noaa_city_query = normalize_city_for_noaa(selected_name)
+
+            run_ml = False
+            if ml_auto_run:
+                run_ml = True
+            else:
+                run_ml = st.button("Run ML forecast now", key="ml_run_btn")
+
+            if run_ml:
+                try:
+                    with st.spinner("Training model and predicting using NOAA daily data..."):
+                        ml_out = cached_noaa_forecast(noaa_city_query, ml_days)
+
+                    c_pred = ml_out["predicted_avg_temp_c"]
+                    f_pred = ml_out["predicted_avg_temp_f"]
+
+                    ml1, ml2, ml3, ml4 = st.columns(4)
+                    ml1.metric("Predicted avg temp", format_temp(c_pred, temp_unit))
+                    ml2.metric("MAE (°C)", "—" if ml_out["test_mae_c"] is None else f"{ml_out['test_mae_c']:.2f}")
+                    ml3.metric("Rows used", f"{ml_out['rows_total']} (train {ml_out['rows_train']}, test {ml_out['rows_test']})")
+                    ml4.metric("NOAA station", ml_out["station_name"])
+
+                    with st.expander("Details"):
+                        st.write(
+                            {
+                                "city_query": noaa_city_query,
+                                "days_used": ml_out["days_used"],
+                                "station_id": ml_out["station_id"],
+                                "station_name": ml_out["station_name"],
+                                "predicted_avg_temp_c": c_pred,
+                                "predicted_avg_temp_f": f_pred,
+                                "parquet_path": ml_out["parquet_path"],
+                            }
+                        )
+                except Exception as e:
+                    st.error(f"ML forecast failed: {e}")
+                    st.info("Tip: try 90 days in the sidebar, or use a more specific city like 'San Jose, CA'.")
+        else:
+            st.info("Pick a city to run the ML forecast.")
+
         # Prepare temp columns (for charts)
         temp_cols = [c for c in ["temp_min", "temp_avg", "temp_max"] if c in dfd.columns]
         dfd = add_temp_cols(dfd, temp_cols, temp_unit)
 
-        # ---- 1) Temperature trend: line + area fill (Google-like) ----
+        # ---- 1) Temperature trend: line + area fill ----
         st.markdown("#### Temperature trend (daily)")
         if "date" in dfd.columns and temp_cols:
-            # Plot average as area fill, plus min/max as lines
-            # Use *_u columns (C or F depending on toggle)
             plot_cols = {c: f"{c}_u" for c in temp_cols if f"{c}_u" in dfd.columns}
 
             base = alt.Chart(dfd).encode(
                 x=alt.X("date:T", title="Date")
             )
 
-            # area fill for avg if present, else use max
             area_field = plot_cols.get("temp_avg") or plot_cols.get("temp_max")
             y_title = "Temperature (°C)" if temp_unit == "°C" else "Temperature (°F)" if temp_unit == "°F" else "Temperature (°C)"
-            # If °C+°F we still plot °C by default (cleaner); metrics show both.
 
             area = base.mark_area(opacity=0.25).encode(
                 y=alt.Y(f"{area_field}:Q", title=y_title)
@@ -321,7 +404,7 @@ with tab1:
         else:
             st.info("Temperature fields not found in daily data.")
 
-        # ---- 2) Precipitation: line chart (requested) ----
+        # ---- 2) Precipitation: line chart ----
         st.markdown("#### Precipitation (daily)")
         if "date" in dfd.columns and "precip_sum" in dfd.columns:
             precip_line = (
@@ -360,7 +443,6 @@ with tab2:
                 dfh["temperature_u"] = dfh["temperature_2m"]
                 y_title = "Temperature (°C)"
             else:
-                # plot °C for chart; metrics can show both (keeps chart readable)
                 dfh["temperature_u"] = dfh["temperature_2m"]
                 y_title = "Temperature (°C)"
         else:
