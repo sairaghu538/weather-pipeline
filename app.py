@@ -12,7 +12,7 @@ from pipeline.config import RAW_DIR, CURATED_DIR, City
 from pipeline.ingest import ingest_cities
 from pipeline.transform import build_curated, build_daily_aggregates
 
-# NEW: NOAA ML forecast
+# NOAA ML forecast
 from pipeline.weather_ml import run_city_forecast
 
 
@@ -181,15 +181,15 @@ def cached_noaa_forecast(city_query: str, days: int) -> dict[str, Any]:
 # ----------------------------
 st.set_page_config(page_title="Weather Data Pipeline", layout="wide")
 
-# Sidebar: unit toggle (keep UI clean)
+# Sidebar: unit toggle
 st.sidebar.markdown("### Temperature unit")
 temp_unit = st.sidebar.radio(
     "Display temperature as",
     options=["°C", "°F", "°C + °F"],
-    index=2,  # default = both
+    index=2,
 )
 
-# NEW: sidebar ML settings
+# Sidebar: ML settings
 st.sidebar.markdown("### ML forecast (NOAA)")
 ml_days = st.sidebar.selectbox("Training window", options=[30, 90], index=0)
 ml_auto_run = st.sidebar.checkbox("Auto-run ML when city changes", value=True)
@@ -203,7 +203,7 @@ daily_path = CURATED_DIR / "weather_daily.parquet"
 col1, col2 = st.columns(2)
 
 # ----------------------------
-# Left: Search + Run (Step 1 + Step 2)
+# Left: Search + Run
 # ----------------------------
 with col1:
     st.subheader("Pipeline")
@@ -301,9 +301,6 @@ with col2:
 
 st.divider()
 
-# ----------------------------
-# Tabs: Daily + Hourly
-# ----------------------------
 tab1, tab2 = st.tabs(["Daily forecast", "Hourly forecast"])
 
 with tab1:
@@ -314,26 +311,49 @@ with tab1:
         if "date" in dfd.columns:
             dfd = dfd.sort_values("date")
 
-        # Metrics (with units)
+        # Latest day metrics (Open-Meteo pipeline)
         last_row = dfd.tail(1)
+        latest_openmeteo_date = None
+        latest_openmeteo_avg_c = None
+
         if len(last_row) == 1:
             r = last_row.iloc[0]
+            latest_openmeteo_date = r.get("date")
+            latest_openmeteo_avg_c = r.get("temp_avg")
+
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Max temp (latest day)", format_temp(r.get("temp_max"), temp_unit))
             m2.metric("Min temp (latest day)", format_temp(r.get("temp_min"), temp_unit))
             m3.metric("Avg temp (latest day)", format_temp(r.get("temp_avg"), temp_unit))
             m4.metric("Precip (latest day)", f"{float(r.get('precip_sum', 0.0)):.1f}")
 
-        # NEW: ML forecast card (NOAA)
+        # ML forecast section
         st.markdown("### ML forecast (next day avg temp, NOAA)")
+
+        # NEW: clarify the comparison
+        if latest_openmeteo_date is not None:
+            try:
+                latest_dt = pd.to_datetime(latest_openmeteo_date).date()
+                predicted_for_dt = (pd.to_datetime(latest_dt) + pd.Timedelta(days=1)).date()
+                st.caption(
+                    f"Open-Meteo metrics above are for the latest available day ({latest_dt}). "
+                    f"The ML model predicts the next day average temperature ({predicted_for_dt}) using NOAA station history."
+                )
+            except Exception:
+                st.caption(
+                    "Open-Meteo metrics above are for the latest available day. "
+                    "The ML model below predicts the next day average temperature using NOAA station history."
+                )
+        else:
+            st.caption(
+                "Open-Meteo metrics above are for the latest available day. "
+                "The ML model below predicts the next day average temperature using NOAA station history."
+            )
+
         if selected_name:
             noaa_city_query = normalize_city_for_noaa(selected_name)
 
-            run_ml = False
-            if ml_auto_run:
-                run_ml = True
-            else:
-                run_ml = st.button("Run ML forecast now", key="ml_run_btn")
+            run_ml = ml_auto_run or st.button("Run ML forecast now", key="ml_run_btn")
 
             if run_ml:
                 try:
@@ -341,13 +361,19 @@ with tab1:
                         ml_out = cached_noaa_forecast(noaa_city_query, ml_days)
 
                     c_pred = ml_out["predicted_avg_temp_c"]
-                    f_pred = ml_out["predicted_avg_temp_f"]
 
                     ml1, ml2, ml3, ml4 = st.columns(4)
-                    ml1.metric("Predicted avg temp", format_temp(c_pred, temp_unit))
+                    ml1.metric("Predicted avg temp (next day)", format_temp(c_pred, temp_unit))
                     ml2.metric("MAE (°C)", "—" if ml_out["test_mae_c"] is None else f"{ml_out['test_mae_c']:.2f}")
                     ml3.metric("Rows used", f"{ml_out['rows_total']} (train {ml_out['rows_train']}, test {ml_out['rows_test']})")
                     ml4.metric("NOAA station", ml_out["station_name"])
+
+                    # NEW: show Open-Meteo latest avg next to ML predicted next day (not saying they should match)
+                    if latest_openmeteo_avg_c is not None:
+                        st.caption(
+                            f"For context only: Open-Meteo latest-day avg = {format_temp(latest_openmeteo_avg_c, temp_unit)}. "
+                            f"ML is predicting the next day avg based on NOAA station history."
+                        )
 
                     with st.expander("Details"):
                         st.write(
@@ -356,8 +382,8 @@ with tab1:
                                 "days_used": ml_out["days_used"],
                                 "station_id": ml_out["station_id"],
                                 "station_name": ml_out["station_name"],
-                                "predicted_avg_temp_c": c_pred,
-                                "predicted_avg_temp_f": f_pred,
+                                "predicted_avg_temp_c": ml_out["predicted_avg_temp_c"],
+                                "predicted_avg_temp_f": ml_out["predicted_avg_temp_f"],
                                 "parquet_path": ml_out["parquet_path"],
                             }
                         )
@@ -367,11 +393,10 @@ with tab1:
         else:
             st.info("Pick a city to run the ML forecast.")
 
-        # Prepare temp columns (for charts)
+        # Charts
         temp_cols = [c for c in ["temp_min", "temp_avg", "temp_max"] if c in dfd.columns]
         dfd = add_temp_cols(dfd, temp_cols, temp_unit)
 
-        # ---- 1) Temperature trend: line + area fill ----
         st.markdown("#### Temperature trend (daily)")
         if "date" in dfd.columns and temp_cols:
             plot_cols = {c: f"{c}_u" for c in temp_cols if f"{c}_u" in dfd.columns}
@@ -404,7 +429,6 @@ with tab1:
         else:
             st.info("Temperature fields not found in daily data.")
 
-        # ---- 2) Precipitation: line chart ----
         st.markdown("#### Precipitation (daily)")
         if "date" in dfd.columns and "precip_sum" in dfd.columns:
             precip_line = (
@@ -434,7 +458,6 @@ with tab2:
         dfh["time_dt"] = safe_datetime_series(dfh, "time")
         dfh = dfh.sort_values("time_dt")
 
-        # Convert hourly temperature if needed
         if "temperature_2m" in dfh.columns:
             if temp_unit == "°F":
                 dfh["temperature_u"] = dfh["temperature_2m"].apply(lambda x: c_to_f(float(x)) if pd.notna(x) else None)
