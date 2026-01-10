@@ -533,6 +533,30 @@ with tab_daily:
 
              st.altair_chart(chart.configure_view(strokeWidth=0).interactive(), use_container_width=True)
 
+             # Extended Charts (Precip & Wind)
+             col_d1, col_d2 = st.columns(2)
+             with col_d1:
+                 st.subheader("Total Precipitation")
+                 if "precip_sum" in dfd_plot.columns:
+                     cp = alt.Chart(dfd_plot).mark_bar(color='#38BDF8').encode(
+                         x=alt.X("date:T", axis=alt.Axis(title=None, format="%b %d", grid=False)),
+                         y=alt.Y("precip_sum:Q", axis=alt.Axis(title=None, grid=True, gridOpacity=0.1)),
+                         tooltip=["date:T", alt.Tooltip("precip_sum:Q", format=".1f", title="Precip")]
+                     ).configure_view(strokeWidth=0)
+                     st.altair_chart(cp, use_container_width=True)
+            
+             with col_d2:
+                 st.subheader("Avg Wind Speed")
+                 if "wind_avg" in dfd_plot.columns:
+                     cw = alt.Chart(dfd_plot).mark_area(
+                         color='#94A3B8', opacity=0.5, line=True
+                     ).encode(
+                         x=alt.X("date:T", axis=alt.Axis(title=None, format="%b %d", grid=False)),
+                         y=alt.Y("wind_avg:Q", axis=alt.Axis(title=None, grid=True, gridOpacity=0.1)),
+                         tooltip=["date:T", alt.Tooltip("wind_avg:Q", format=".1f", title="Wind")]
+                     ).configure_view(strokeWidth=0)
+                     st.altair_chart(cw, use_container_width=True)
+
         # Raw Data Expander
         with st.expander("View Daily Source Data"):
              st.dataframe(dfd, use_container_width=True)
