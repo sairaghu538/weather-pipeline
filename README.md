@@ -1,136 +1,140 @@
-# Weather Data Engineering Project
+# ⚡ Weather Intelligence Pipeline
 
-A small end to end weather data pipeline with a Streamlit dashboard.
+[![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat&logo=python&logoColor=white)](https://www.python.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=flat&logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![Pandas](https://img.shields.io/badge/Pandas-150458?style=flat&logo=pandas&logoColor=white)](https://pandas.pydata.org/)
+[![Altair](https://img.shields.io/badge/Altair-Visualization-orange?style=flat)](https://altair-viz.github.io/)
 
-It ingests weather data from Open-Meteo, writes raw JSON to a landing zone, transforms into curated Parquet tables, builds daily aggregates, and visualizes everything with charts and metrics. It also includes an optional NOAA based ML forecast for next day average temperature.
-
----
-
-## What this project shows
-
-- API ingestion using Open-Meteo
-- Raw JSON landing zone (local files)
-- Curated Parquet tables (hourly + daily)
-- Daily aggregates and summary metrics
-- Basic data quality handling (nulls, type coercion, date parsing)
-- Streamlit dashboard with:
-  - City search and selection
-  - Temperature unit toggle (°C, °F, both)
-  - Daily temperature trend with area fill
-  - Daily precipitation line chart
-  - Hourly temperature chart with area fill + line
-  - Hourly precipitation line chart
-  - Hourly wind line chart
-- NOAA ML forecast (next day avg temp) using GHCN Daily station history
-  - Training windows: 30, 90, 365 days
-  - Shows MAE and station metadata
-  - Compares ML predicted tomorrow avg vs Open-Meteo tomorrow forecast avg
+> **A modern, end-to-end data engineering project featuring a "Glassmorphism" UI, automated pipeline lineage, and hybrid ML forecasting.**
 
 ---
 
-## Tech stack
+## 🚀 Overview
 
-- Python
-- Pandas
-- Streamlit
-- Altair
-- Requests
-- Geopy (NOAA city geocoding)
-- Scikit-learn (simple regression model)
-- Parquet storage
+The **Weather Intelligence Pipeline** is a robust data engineering showcase that ingests, transforms, and visualizes weather data in real-time. Unlike standard dashboards, this project focuses on **Pipeline Observability** and **Data Quality**, providing a "Control Room" experience for monitoring ingestion flows and artifact integrity.
+
+It combines **Open-Meteo** API data with a custom **NOAA-trained ML model** to provide unique, hybrid forecasts with accuracy tracking.
+
+<!-- User can add screenshot here -->
+![alt text](image.png)
+![alt text](image-1.png)
+![alt text](image-2.png)
+![alt text](image-5.png)
+![alt text](image-3.png)
+![alt text](image-4.png)
+![alt text](image-6.png)
+![alt text](image-7.png)
+
+<!-- ![Dashboard Overview](docs/images/dashboard_main.png) -->
 
 ---
 
-## Project structure (typical)
+## ✨ Key Features
+
+### 🔧 1. Data Engineering Suite
+A dedicated "Control Room" tab provides deep visibility into the backend processes:
+- **Visual Pipeline Lineage**: Real-time Mermaid DAG showing data flow from API to Parquet.
+- **Execution Telemetry**: Trace execution time and status for every run.
+- **Artifact Explorer**: Built-in JSON and Parquet viewer to inspect raw vs curated data without leaving the UI.
+- **Data Quality Inspector**: Automated checks for null values, data freshness, and completeness.
+
+### 📊 2. Interactive Analytics
+- **Daily & Hourly Views**: Switch between long-term trends and high-resolution hourly data.
+- **Multi-Metric Visualization**:
+    - Temperature Trends (Area Charts)
+    - Precipitation Levels (Bar Charts)
+    - Wind Patterns (Area/Line Charts)
+- **Dynamic Filtering**: Instant city search with geocoding and history.
+
+### 🤖 3. Hybrid ML Forecasting
+- **Proprietary Model**: Trains a light-weight regression model on 30/90/365 days of historical data from NOAA GHCN stations.
+- **Model vs API Comparison**: Benchmarks the custom ML prediction against Open-Meteo's forecast to surface divergences.
+- **Transparent Accuracy**: Displays Mean Absolute Error (MAE) and training metadata for every prediction.
+
+---
+
+## 🏗️ Architecture
+
+The pipeline follows a modern ETL pattern:
+
+```mermaid
+graph LR
+    A[Open-Meteo API] -->|Ingest JSON| B(Raw Landing Zone)
+    B -->|Pandas Transform| C{Curated Zone}
+    C -->|Aggregations| D[Hourly/Daily Parquet]
+    D -->|Feature Eng| E[ML Model Training]
+    E -->|Inference| F[Streamlit Dashboard]
+    
+    style A fill:#0f172a,stroke:#334155,color:#fff
+    style B fill:#1e293b,stroke:#7c3aed,color:#fff
+    style D fill:#1e293b,stroke:#38bdf8,color:#fff
+    style F fill:#312e81,stroke:#a78bfa,color:#fff
+```
+
+1.  **Ingest**: Fetches raw hourly weather data for the selected location (Open-Meteo).
+2.  **Transform**: Cleanses data, handles type casting, and standardizes timestamps.
+3.  **Store**: Saves intermediate artifacts as optimized **Parquet** files (`weather_hourly.parquet`, `weather_daily.parquet`).
+4.  **Serve**: Streamlit loads the curated data for visualization and interactive filtering.
+
+---
+
+## 🛠️ Tech Stack
+
+- **Core**: Python 3.10+
+- **Data Processing**: Pandas, NumPy
+- **Visualization**: Altair (Declarative Statistical Visualization)
+- **App Framework**: Streamlit (with Custom CSS/Glassmorphism)
+- **External APIs**: Open-Meteo (Weather), Geopy/Open-Meteo (Geocoding)
+
+---
+
+## ⚡ Getting Started
+
+### Prerequisites
+- Python 3.8 or higher
+
+### Installation
+
+1.  **Clone the repository**
+    ```bash
+    git clone https://github.com/sairaghu538/weather-pipeline.git
+    cd weather-pipeline
+    ```
+
+2.  **Create a virtual environment**
+    ```bash
+    python -m venv .venv
+    # Windows
+    .venv\Scripts\activate
+    # Mac/Linux
+    source .venv/bin/activate
+    ```
+
+3.  **Install dependencies**
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+4.  **Run the application**
+    ```bash
+    streamlit run app.py
+    ```
+
+---
+
+## 📂 Project Structure
 
 ```text
 .
-├── app.py
-├── requirements.txt
-├── pipeline/
-│   ├── config.py
-│   ├── ingest.py
-│   ├── transform.py
-│   └── weather_ml.py
-├── data/                  # generated (local)
-├── models/                # optional (local)
-└── .cache_noaa/            # NOAA station + dly cache (local)
-
-
-
-Setup
-1) Create and activate a virtual environment
-python -m venv .venv
-source .venv/bin/activate        # macOS/Linux
-# .venv\Scripts\activate         # Windows PowerShell
-
-2) Install dependencies
-pip install -r requirements.txt
-
-3) Run the Streamlit app
-streamlit run app.py
-
-How to use the app
-Pipeline run
-
-Search a US city (example: New Castle)
-
-Pick the exact city from the dropdown
-
-Click Run pipeline now
-
-The app writes:
-
-Raw JSON into the raw directory
-
-Curated Parquet into the curated directory
-
-Daily forecast tab
-
-Shows latest day metrics: max, min, avg, precipitation
-
-Shows NOAA ML next day average prediction
-
-Shows Open-Meteo tomorrow average (forecast) as a reference
-
-Shows delta: ML minus Open-Meteo
-
-Charts:
-
-Temperature trend (daily) with area fill
-
-Precipitation (daily) line chart
-
-Table view of daily rows
-
-Hourly forecast tab
-
-Hourly temperature chart (area + line)
-
-Hourly precipitation line chart
-
-Hourly wind line chart
-
-Latest rows table (trimmed)
-
-NOAA ML forecast details
-
-What it is:
-
-Uses NOAA GHCN Daily station history near the selected city
-
-Trains a lightweight regression model using lag features
-
-Predicts tomorrow’s average temperature
-
-What it is not:
-
-It is not expected to exactly match Open-Meteo or Google weather.
-
-Differences happen because data sources and modeling methods differ.
-
-If it fails:
-
-Some nearby stations may not have usable rows for the requested window.
-
-The ML module tries multiple nearby stations, but some cities may still fail.
+├── app.py                 # Main Streamlit Dashboard application
+├── pipeline/              # ETL Logic Module
+│   ├── config.py          # Configuration constants
+│   ├── ingest.py          # API fetching & Raw storage
+│   ├── transform.py       # Pandas transformations & Parquet writing
+│   └── weather_ml.py      # NOAA ML Model & Inference
+├── data/                  # Local data storage (Gitignored)
+│   ├── raw/               # JSON Landing Zone
+│   └── curated/           # Parquet Tables
+├── .streamlit/            # App theming and config
+└── requirements.txt       # Python dependencies
+```
