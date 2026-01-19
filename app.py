@@ -734,11 +734,22 @@ with tab_de:
 # ============================
 with tab_stream:
     st.subheader("📡 Live Streaming Data")
-    st.markdown("""
-    This tab shows **near real-time** weather data ingested via **Apache Kafka**.
-    - Producer polls Open-Meteo every **60 seconds**
-    - Consumer writes to `data/streamed/weather_stream.parquet`
-    """)
+    
+    # Auto-refresh controls
+    col_refresh, col_info = st.columns([1, 3])
+    with col_refresh:
+        auto_refresh = st.checkbox("🔄 Auto-Refresh", value=False, help="Automatically refresh every 10 seconds")
+    with col_info:
+        st.markdown("""
+        **Near real-time** weather data ingested via **Apache Kafka**.
+        Producer polls Open-Meteo every **60 seconds** → Consumer writes to Parquet.
+        """)
+    
+    # Auto-refresh logic
+    if auto_refresh:
+        import time as time_module
+        time_module.sleep(10)
+        st.rerun()
     
     stream_path = CURATED_DIR.parent / "streamed" / "weather_stream.parquet"
     
@@ -760,59 +771,128 @@ cd streaming && python consumer.py
     else:
         df_stream = pd.read_parquet(stream_path)
         
-        # Stats
-        col_s1, col_s2, col_s3 = st.columns(3)
+        # Data Freshness Check
+        data_age_seconds = None
+        if "ingested_at" in df_stream.columns and len(df_stream) > 0:
+            latest_ts = df_stream["ingested_at"].max()
+            data_age_seconds = (datetime.now().timestamp() - latest_ts)
+        
+        # City Filter for Multi-City
+        all_cities = ["All Cities"]
+        if "city" in df_stream.columns:
+            unique_cities = sorted(df_stream["city"].dropna().unique().tolist())
+            all_cities += unique_cities
+        
+        selected_stream_city = st.selectbox("🌎 Filter by City", all_cities, key="stream_city_filter")
+        
+        # Apply filter
+        df_display = df_stream.copy()
+        if selected_stream_city != "All Cities":
+            df_display = df_stream[df_stream["city"] == selected_stream_city]
+        
+        # Stats Row
+        col_s1, col_s2, col_s3, col_s4 = st.columns(4)
         with col_s1:
-            st.metric("Total Events", len(df_stream))
+            st.metric("📊 Total Events", len(df_display))
         with col_s2:
-            if "ingested_at" in df_stream.columns:
-                latest_ts = df_stream["ingested_at"].max()
-                st.metric("Latest Ingestion", datetime.fromtimestamp(latest_ts).strftime("%H:%M:%S"))
-        with col_s3:
             if "city" in df_stream.columns:
-                st.metric("City", df_stream["city"].iloc[-1] if len(df_stream) > 0 else "—")
+                st.metric("🌆 Cities", len(unique_cities) if "city" in df_stream.columns else 1)
+        with col_s3:
+            if "ingested_at" in df_display.columns and len(df_display) > 0:
+                st.metric("⏰ Latest", datetime.fromtimestamp(df_display["ingested_at"].max()).strftime("%H:%M:%S"))
+        with col_s4:
+            # Freshness indicator
+            if data_age_seconds is not None:
+                if data_age_seconds < 120:
+                    st.success(f"🟢 Fresh ({int(data_age_seconds)}s ago)")
+                elif data_age_seconds < 300:
+                    st.warning(f"🟡 Stale ({int(data_age_seconds)}s ago)")
+                else:
+                    st.error(f"🔴 Old ({int(data_age_seconds/60):.0f}m ago)")
+        
+        # Temperature Alert
+        if "temperature_2m" in df_display.columns and len(df_display) > 0:
+            latest_temp = df_display["temperature_2m"].iloc[-1]
+            if latest_temp is not None:
+                if latest_temp > 35:
+                    st.error(f"🔥 **HEAT ALERT**: Current temperature is {latest_temp:.1f}°C - Stay hydrated!")
+                elif latest_temp < 0:
+                    st.warning(f"❄️ **COLD ALERT**: Current temperature is {latest_temp:.1f}°C - Bundle up!")
         
         st.divider()
         
-        # Temperature Chart
-        if "temperature_2m" in df_stream.columns and "forecast_time" in df_stream.columns:
+        # Temperature Chart with gradient
+        if "temperature_2m" in df_display.columns and "forecast_time" in df_display.columns:
             st.subheader("📈 Temperature (Live)")
-            df_stream["forecast_time_dt"] = pd.to_datetime(df_stream["forecast_time"], errors="coerce")
+            df_display["forecast_time_dt"] = pd.to_datetime(df_display["forecast_time"], errors="coerce")
             
-            temp_chart = alt.Chart(df_stream).mark_line(
-                color='#38BDF8', strokeWidth=3, point=True
-            ).encode(
+            # Line + Area for gradient effect
+            base = alt.Chart(df_display).encode(
                 x=alt.X("forecast_time_dt:T", axis=alt.Axis(title=None, format="%H:%M")),
-                y=alt.Y("temperature_2m:Q", axis=alt.Axis(title="Temperature (°C)")),
-                tooltip=["forecast_time:N", "temperature_2m:Q"]
-            ).configure_view(strokeWidth=0)
+            )
             
+            area = base.mark_area(
+                opacity=0.3,
+                color=alt.Gradient(
+                    gradient='linear',
+                    stops=[
+                        alt.GradientStop(color='#38BDF8', offset=0),
+                        alt.GradientStop(color='rgba(56, 189, 248, 0)', offset=1)
+                    ],
+                    x1=1, x2=1, y1=1, y2=0
+                )
+            ).encode(
+                y=alt.Y("temperature_2m:Q", axis=alt.Axis(title="Temperature (°C)")),
+            )
+            
+            line = base.mark_line(
+                color='#38BDF8', strokeWidth=3
+            ).encode(
+                y=alt.Y("temperature_2m:Q"),
+            )
+            
+            points = base.mark_circle(
+                color='#38BDF8', size=60
+            ).encode(
+                y=alt.Y("temperature_2m:Q"),
+                tooltip=["city:N", "forecast_time:N", "temperature_2m:Q"]
+            )
+            
+            temp_chart = (area + line + points).configure_view(strokeWidth=0)
             st.altair_chart(temp_chart.interactive(), use_container_width=True)
         
-        # Wind & Precip
+        # Wind & Precip with improved colors
         col_w, col_p = st.columns(2)
         with col_w:
-            if "windspeed_10m" in df_stream.columns:
+            if "windspeed_10m" in df_display.columns:
                 st.subheader("💨 Wind Speed")
-                wind_chart = alt.Chart(df_stream).mark_bar(color='#94A3B8').encode(
+                wind_chart = alt.Chart(df_display).mark_bar(
+                    color='#A78BFA',  # Purple
+                    cornerRadiusTopLeft=4,
+                    cornerRadiusTopRight=4
+                ).encode(
                     x=alt.X("forecast_time_dt:T", axis=alt.Axis(title=None, format="%H:%M")),
                     y=alt.Y("windspeed_10m:Q", axis=alt.Axis(title="km/h")),
+                    tooltip=["city:N", "forecast_time:N", "windspeed_10m:Q"]
                 ).configure_view(strokeWidth=0)
                 st.altair_chart(wind_chart, use_container_width=True)
         
         with col_p:
-            if "precipitation" in df_stream.columns:
+            if "precipitation" in df_display.columns:
                 st.subheader("🌧️ Precipitation")
-                precip_chart = alt.Chart(df_stream).mark_bar(color='#38BDF8').encode(
+                precip_chart = alt.Chart(df_display).mark_bar(
+                    color='#22D3EE',  # Cyan
+                    cornerRadiusTopLeft=4,
+                    cornerRadiusTopRight=4
+                ).encode(
                     x=alt.X("forecast_time_dt:T", axis=alt.Axis(title=None, format="%H:%M")),
                     y=alt.Y("precipitation:Q", axis=alt.Axis(title="mm")),
+                    tooltip=["city:N", "forecast_time:N", "precipitation:Q"]
                 ).configure_view(strokeWidth=0)
                 st.altair_chart(precip_chart, use_container_width=True)
         
         # Raw Data
-        with st.expander("View Raw Streamed Data"):
-            st.dataframe(df_stream, use_container_width=True)
-        
-        # Auto-refresh hint
-        st.info("💡 Tip: Click 'Rerun' (R key) to see the latest data, or enable auto-refresh in Streamlit settings.")
+        with st.expander("📋 View Raw Streamed Data"):
+            st.dataframe(df_display, use_container_width=True)
+
 

@@ -1,0 +1,4 @@
+
+kafka_native/kafka/kafka-logs/
+kafka_native/kafka/zookeeper-data/
+data/streamed/
