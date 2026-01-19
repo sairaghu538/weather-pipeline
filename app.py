@@ -395,7 +395,7 @@ with st.expander("🛠️ Pipeline Control Center", expanded=True):
 st.divider()
 
 # Dashboard Tabs
-tab_daily, tab_hourly, tab_de = st.tabs(["📅 Daily Forecast & Trends", "⏱️ Hourly Analysis", "🔧 Data Engineering"])
+tab_daily, tab_hourly, tab_de, tab_stream = st.tabs(["📅 Daily Forecast & Trends", "⏱️ Hourly Analysis", "🔧 Data Engineering", "📡 Live Stream"])
 
 # ============================
 # Daily View
@@ -728,3 +728,91 @@ with tab_de:
              st.success(f"✅ {hourly_path.name} exists")
         else:
              st.error(f"❌ {hourly_path.name} missing")
+
+# ============================
+# Live Stream View (Kafka)
+# ============================
+with tab_stream:
+    st.subheader("📡 Live Streaming Data")
+    st.markdown("""
+    This tab shows **near real-time** weather data ingested via **Apache Kafka**.
+    - Producer polls Open-Meteo every **60 seconds**
+    - Consumer writes to `data/streamed/weather_stream.parquet`
+    """)
+    
+    stream_path = CURATED_DIR.parent / "streamed" / "weather_stream.parquet"
+    
+    if not stream_path.exists():
+        st.warning("⏳ No streamed data yet. Start the Kafka producer and consumer to see data here.")
+        st.code("""
+# Terminal 1 (Zookeeper)
+cd kafka_native\\kafka && .\\start_zookeeper.ps1
+
+# Terminal 2 (Kafka)
+cd kafka_native\\kafka && .\\start_kafka.ps1
+
+# Terminal 3 (Producer)
+cd streaming && python producer.py
+
+# Terminal 4 (Consumer)
+cd streaming && python consumer.py
+        """, language="powershell")
+    else:
+        df_stream = pd.read_parquet(stream_path)
+        
+        # Stats
+        col_s1, col_s2, col_s3 = st.columns(3)
+        with col_s1:
+            st.metric("Total Events", len(df_stream))
+        with col_s2:
+            if "ingested_at" in df_stream.columns:
+                latest_ts = df_stream["ingested_at"].max()
+                st.metric("Latest Ingestion", datetime.fromtimestamp(latest_ts).strftime("%H:%M:%S"))
+        with col_s3:
+            if "city" in df_stream.columns:
+                st.metric("City", df_stream["city"].iloc[-1] if len(df_stream) > 0 else "—")
+        
+        st.divider()
+        
+        # Temperature Chart
+        if "temperature_2m" in df_stream.columns and "forecast_time" in df_stream.columns:
+            st.subheader("📈 Temperature (Live)")
+            df_stream["forecast_time_dt"] = pd.to_datetime(df_stream["forecast_time"], errors="coerce")
+            
+            temp_chart = alt.Chart(df_stream).mark_line(
+                color='#38BDF8', strokeWidth=3, point=True
+            ).encode(
+                x=alt.X("forecast_time_dt:T", axis=alt.Axis(title=None, format="%H:%M")),
+                y=alt.Y("temperature_2m:Q", axis=alt.Axis(title="Temperature (°C)")),
+                tooltip=["forecast_time:N", "temperature_2m:Q"]
+            ).configure_view(strokeWidth=0)
+            
+            st.altair_chart(temp_chart.interactive(), use_container_width=True)
+        
+        # Wind & Precip
+        col_w, col_p = st.columns(2)
+        with col_w:
+            if "windspeed_10m" in df_stream.columns:
+                st.subheader("💨 Wind Speed")
+                wind_chart = alt.Chart(df_stream).mark_bar(color='#94A3B8').encode(
+                    x=alt.X("forecast_time_dt:T", axis=alt.Axis(title=None, format="%H:%M")),
+                    y=alt.Y("windspeed_10m:Q", axis=alt.Axis(title="km/h")),
+                ).configure_view(strokeWidth=0)
+                st.altair_chart(wind_chart, use_container_width=True)
+        
+        with col_p:
+            if "precipitation" in df_stream.columns:
+                st.subheader("🌧️ Precipitation")
+                precip_chart = alt.Chart(df_stream).mark_bar(color='#38BDF8').encode(
+                    x=alt.X("forecast_time_dt:T", axis=alt.Axis(title=None, format="%H:%M")),
+                    y=alt.Y("precipitation:Q", axis=alt.Axis(title="mm")),
+                ).configure_view(strokeWidth=0)
+                st.altair_chart(precip_chart, use_container_width=True)
+        
+        # Raw Data
+        with st.expander("View Raw Streamed Data"):
+            st.dataframe(df_stream, use_container_width=True)
+        
+        # Auto-refresh hint
+        st.info("💡 Tip: Click 'Rerun' (R key) to see the latest data, or enable auto-refresh in Streamlit settings.")
+
