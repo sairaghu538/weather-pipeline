@@ -106,7 +106,7 @@ This project features a **near real-time streaming pipeline** using Apache Kafka
 *Live Stream tab showing real-time data with city filter and temperature charts*
 
 ![Multi-City Streaming](image-10.png)
-*50 US cities streaming simultaneously with auto-refresh*
+*100 US cities streaming simultaneously with auto-refresh*
 
 ### Running the Streaming Pipeline
 
@@ -117,7 +117,7 @@ cd kafka_native/kafka && ./start_zookeeper.ps1
 # Terminal 2: Kafka Broker
 cd kafka_native/kafka && ./start_kafka.ps1
 
-# Terminal 3: Producer (50 cities)
+# Terminal 3: Producer (100 cities)
 cd streaming && python producer.py
 
 # Terminal 4: Consumer
@@ -127,9 +127,9 @@ cd streaming && python consumer.py
 ### Streaming Architecture
 | Component | Description |
 |-----------|-------------|
-| `producer.py` | Polls Open-Meteo for 50 cities every 60s |
+| `producer.py` | Polls Open-Meteo for 100 cities every 15 min |
 | `consumer.py` | Reads from Kafka, writes to Parquet |
-| `cities.json` | List of 50 major US cities |
+| `cities.json` | List of 100 major US cities |
 | Kafka Topic | `weather.raw.hourly` |
 ![kafka-live-stream](image-9.png)
 ![kafka-multi-city](image-10.png)
