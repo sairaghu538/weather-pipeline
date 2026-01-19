@@ -55,36 +55,94 @@ A dedicated "Control Room" tab provides deep visibility into the backend process
 
 ## 🏗️ Architecture
 
-The pipeline follows a modern ETL pattern:
+The pipeline follows a modern **Lambda Architecture** with both batch and streaming paths:
 
 ```mermaid
 graph LR
-    A[Open-Meteo API] -->|Ingest JSON| B(Raw Landing Zone)
-    B -->|Pandas Transform| C{Curated Zone}
-    C -->|Aggregations| D[Hourly/Daily Parquet]
+    subgraph Batch Path
+        A[Open-Meteo API] -->|Ingest JSON| B(Raw Landing Zone)
+        B -->|Pandas Transform| C{Curated Zone}
+        C -->|Aggregations| D[Hourly/Daily Parquet]
+    end
+    
+    subgraph Streaming Path
+        K[Open-Meteo API] -->|60s Poll| P[Kafka Producer]
+        P -->|weather.raw.hourly| Q[Apache Kafka]
+        Q --> R[Kafka Consumer]
+        R -->|Append| S[Streamed Parquet]
+    end
+    
     D -->|Feature Eng| E[ML Model Training]
     E -->|Inference| F[Streamlit Dashboard]
+    S --> F
     
     style A fill:#0f172a,stroke:#334155,color:#fff
     style B fill:#1e293b,stroke:#7c3aed,color:#fff
     style D fill:#1e293b,stroke:#38bdf8,color:#fff
     style F fill:#312e81,stroke:#a78bfa,color:#fff
+    style Q fill:#dc2626,stroke:#fff,color:#fff
 ```
 
-1.  **Ingest**: Fetches raw hourly weather data for the selected location (Open-Meteo).
-2.  **Transform**: Cleanses data, handles type casting, and standardizes timestamps.
-3.  **Store**: Saves intermediate artifacts as optimized **Parquet** files (`weather_hourly.parquet`, `weather_daily.parquet`).
-4.  **Serve**: Streamlit loads the curated data for visualization and interactive filtering.
+1.  **Batch Ingest**: Fetches raw hourly weather data on-demand (Open-Meteo).
+2.  **Streaming Ingest**: Kafka producer polls 50 US cities every 60 seconds.
+3.  **Transform**: Cleanses data, handles type casting, and standardizes timestamps.
+4.  **Store**: Saves artifacts as optimized **Parquet** files.
+5.  **Serve**: Streamlit loads both batch and streamed data for visualization.
 
+---
+
+## 📡 Real-Time Streaming (Kafka)
+
+This project features a **near real-time streaming pipeline** using Apache Kafka:
+
+### Features
+- ⚡ **50 US Cities** streaming simultaneously
+- 🔄 **60-second polling** from Open-Meteo API
+- 📊 **Live Dashboard** with auto-refresh and city filter
+- 🔥 **Temperature Alerts** (Heat > 35°C, Cold < 0°C)
+- 🟢 **Data Freshness Indicator** (Fresh/Stale/Old)
+
+![Live Stream Dashboard](image-9.png)
+*Live Stream tab showing real-time data with city filter and temperature charts*
+
+![Multi-City Streaming](image-10.png)
+*50 US cities streaming simultaneously with auto-refresh*
+
+### Running the Streaming Pipeline
+
+```powershell
+# Terminal 1: Zookeeper
+cd kafka_native/kafka && ./start_zookeeper.ps1
+
+# Terminal 2: Kafka Broker
+cd kafka_native/kafka && ./start_kafka.ps1
+
+# Terminal 3: Producer (50 cities)
+cd streaming && python producer.py
+
+# Terminal 4: Consumer
+cd streaming && python consumer.py
+```
+
+### Streaming Architecture
+| Component | Description |
+|-----------|-------------|
+| `producer.py` | Polls Open-Meteo for 50 cities every 60s |
+| `consumer.py` | Reads from Kafka, writes to Parquet |
+| `cities.json` | List of 50 major US cities |
+| Kafka Topic | `weather.raw.hourly` |
+![kafka-live-stream](image-9.png)
+![kafka-multi-city](image-10.png)
 ---
 
 ## 🛠️ Tech Stack
 
 - **Core**: Python 3.10+
-- **Data Processing**: Pandas, NumPy
+- **Streaming**: Apache Kafka 3.6.1 (ZooKeeper mode)
+- **Data Processing**: Pandas, NumPy, PyArrow
 - **Visualization**: Altair (Declarative Statistical Visualization)
 - **App Framework**: Streamlit (with Custom CSS/Glassmorphism)
-- **External APIs**: Open-Meteo (Weather), Geopy/Open-Meteo (Geocoding)
+- **External APIs**: Open-Meteo (Weather), NOAA GHCN (ML Training)
 
 ---
 
@@ -126,15 +184,23 @@ graph LR
 
 ```text
 .
-├── app.py                 # Main Streamlit Dashboard application
-├── pipeline/              # ETL Logic Module
-│   ├── config.py          # Configuration constants
-│   ├── ingest.py          # API fetching & Raw storage
-│   ├── transform.py       # Pandas transformations & Parquet writing
-│   └── weather_ml.py      # NOAA ML Model & Inference
-├── data/                  # Local data storage (Gitignored)
-│   ├── raw/               # JSON Landing Zone
-│   └── curated/           # Parquet Tables
-├── .streamlit/            # App theming and config
-└── requirements.txt       # Python dependencies
+├── app.py                   # Main Streamlit Dashboard
+├── pipeline/                # Batch ETL Logic
+│   ├── config.py            # Configuration constants
+│   ├── ingest.py            # API fetching & Raw storage
+│   ├── transform.py         # Pandas transformations
+│   └── weather_ml.py        # NOAA ML Model & Inference
+├── streaming/               # Kafka Streaming Pipeline
+│   ├── producer.py          # Multi-city Kafka producer
+│   ├── consumer.py          # Kafka to Parquet consumer
+│   └── cities.json          # 50 US cities with coordinates
+├── kafka_native/            # Kafka installation & scripts
+│   ├── setup_kafka.ps1      # Kafka setup script
+│   └── kafka/               # Kafka binaries
+├── data/                    # Local data storage
+│   ├── raw/                 # JSON Landing Zone
+│   ├── curated/             # Batch Parquet Tables
+│   └── streamed/            # Kafka-streamed Parquet
+├── .streamlit/              # App theming
+└── requirements.txt         # Python dependencies
 ```
