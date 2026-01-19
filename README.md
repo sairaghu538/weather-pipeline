@@ -96,8 +96,8 @@ graph LR
 This project features a **near real-time streaming pipeline** using Apache Kafka:
 
 ### Features
-- ⚡ **50 US Cities** streaming simultaneously
-- 🔄 **60-second polling** from Open-Meteo API
+- ⚡ **100 US Cities** streaming simultaneously
+- 🔄 **15-minute polling** (API rate limit safe: ~9,600 calls/day)
 - 📊 **Live Dashboard** with auto-refresh and city filter
 - 🔥 **Temperature Alerts** (Heat > 35°C, Cold < 0°C)
 - 🟢 **Data Freshness Indicator** (Fresh/Stale/Old)

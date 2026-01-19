@@ -14,7 +14,7 @@ from kafka import KafkaProducer
 KAFKA_TOPIC = "weather.raw.hourly"
 KAFKA_SERVER = "localhost:9092"
 CITIES_FILE = Path(__file__).parent / "cities.json"
-POLL_INTERVAL = 60  # seconds between full cycles
+POLL_INTERVAL = 900  # 15 minutes between full cycles (API rate limit safe)
 API_DELAY = 1  # seconds between API calls (rate limiting)
 
 def load_cities():
