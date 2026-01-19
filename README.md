@@ -131,8 +131,49 @@ cd streaming && python consumer.py
 | `consumer.py` | Reads from Kafka, writes to Parquet |
 | `cities.json` | List of 100 major US cities |
 | Kafka Topic | `weather.raw.hourly` |
+
 ![kafka-live-stream](image-9.png)
 ![kafka-multi-city](image-10.png)
+
+### ☁️ Cloud Kafka Setup (Production)
+
+For production deployment, replace local Kafka with a cloud provider:
+
+| Provider | Free Tier | Setup Complexity |
+|----------|-----------|------------------|
+| **Confluent Cloud** | $400 credit (30 days) | Easy |
+| **AWS MSK** | No free tier | Medium |
+| **Aiven** | $300 credit trial | Easy |
+
+**To use cloud Kafka:**
+
+1. Create a cluster on your chosen provider
+2. Get the **Bootstrap Server URL** and **API credentials**
+3. Update `producer.py` and `consumer.py`:
+
+```python
+# Before (Local)
+KAFKA_SERVER = "localhost:9092"
+
+# After (Confluent Cloud example)
+KAFKA_SERVER = "pkc-xxxxx.us-west-2.aws.confluent.cloud:9092"
+
+# Add SASL authentication
+producer = KafkaProducer(
+    bootstrap_servers=KAFKA_SERVER,
+    security_protocol="SASL_SSL",
+    sasl_mechanism="PLAIN",
+    sasl_plain_username="YOUR_API_KEY",
+    sasl_plain_password="YOUR_API_SECRET",
+    value_serializer=lambda v: json.dumps(v).encode('utf-8')
+)
+```
+
+4. Create the topic `weather.raw.hourly` in your cloud console
+5. Deploy producer/consumer to a cloud VM or container
+
+> **Note:** Store credentials in environment variables, not in code!
+
 ---
 
 ## 🛠️ Tech Stack
