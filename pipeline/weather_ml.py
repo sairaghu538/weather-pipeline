@@ -66,6 +66,11 @@ class ForecastResult:
     # NEW: for alignment with Open-Meteo reference day
     noaa_last_date: Optional[str] = None
     target_date: Optional[str] = None
+    
+    # NEW: 7-Day Forecast
+    dates_7d: Optional[List[str]] = None
+    predicted_temp_c_7d: Optional[List[float]] = None
+    predicted_temp_f_7d: Optional[List[float]] = None
 
 
 # -----------------------------
@@ -449,10 +454,97 @@ def predict_next_day_avg_temp(model: LinearRegression, df_feat: pd.DataFrame) ->
     return pred_c
 
 
-def run_city_forecast(city: str, days: int = 30, save_model: bool = True) -> ForecastResult:
-    raw_df, station_id, station_name = fetch_daily_history(city, days)
+def predict_next_7_days(model: LinearRegression, df_feat: pd.DataFrame) -> Tuple[List[str], List[float]]:
+    """
+    Predict next 7 days using recursive regression.
+    Predict t+1, assume it's true, use it to predict t+2, etc.
+    """
+    feature_cols = [
+        "avg_temp_c_lag1",
+        "avg_temp_c_lag2",
+        "avg_temp_c_lag3",
+        "min_temp_c",
+        "max_temp_c",
+        "precip_mm",
+    ]
+    # Filter only available columns
+    feature_cols = [c for c in feature_cols if c in df_feat.columns]
 
-    # NEW: determine target day based on NOAA last observed date, not "today"
+    # Get latest known data
+    last_row = df_feat.sort_values("date").iloc[-1].copy()
+    last_date = pd.to_datetime(last_row["date"])
+    
+    predictions_c = []
+    future_dates = []
+
+    # Recursive loop for 7 days
+    current_feats = {c: float(last_row[c]) for c in feature_cols}
+    
+    # We need to maintain the lag state manually
+    # lags: [lag1, lag2, lag3] -> [pred, lag1, lag2]
+    lag1 = current_feats.get("avg_temp_c_lag1", current_feats.get("min_temp_c", 0)) # fallback
+    lag2 = current_feats.get("avg_temp_c_lag2", lag1)
+    lag3 = current_feats.get("avg_temp_c_lag3", lag2)
+
+    for i in range(1, 8):
+        # 1. Build input vector
+        # Note: In a real recursive model, we'd predict min/max too or use a vector model.
+        # Here we simplify: assume min/max/precip stay roughly similar (persistence) or 
+        # use season avg. For short term (7d), persistence of exogenous vars + lag updates is a common baseline.
+        
+        # specific assumption: lags update, others stay constant (persistence forecast for exogenous)
+        input_row = pd.DataFrame([current_feats])
+        
+        # Update lags in input_row based on previous step
+        if "avg_temp_c_lag1" in feature_cols: input_row["avg_temp_c_lag1"] = lag1
+        if "avg_temp_c_lag2" in feature_cols: input_row["avg_temp_c_lag2"] = lag2
+        if "avg_temp_c_lag3" in feature_cols: input_row["avg_temp_c_lag3"] = lag3
+
+        # Predict Next Temp
+        pred_c = float(model.predict(input_row)[0])
+        predictions_c.append(pred_c)
+        
+        next_dt = (last_date + pd.Timedelta(days=i)).date()
+        future_dates.append(str(next_dt))
+
+        # Update state for next iteration
+        lag3 = lag2
+        lag2 = lag1
+        lag1 = pred_c # The prediction becomes lag1 for the next day
+
+    return future_dates, predictions_c
+
+
+def run_city_forecast(city: str, days: int = 365, save_model: bool = True) -> ForecastResult:
+    """
+    Orchestrates grabbing data and running the forecast.
+    Attempts multiple windows (days, 365, 180, 90) to ensure we find enough data.
+    """
+    # Robust History Strategy: Try 365 -> 180 -> 90 -> 'days'
+    windows_to_try = sorted(list(set([365, 180, 90, days])), reverse=True)
+    
+    raw_df = pd.DataFrame()
+    station_id = ""
+    station_name = ""
+    start_days_used = days
+
+    for w in windows_to_try:
+        try:
+            # print(f"Trying window: {w} days...")
+            raw_df, station_id, station_name = fetch_daily_history(city, w)
+            df_check = build_features(raw_df)
+            if len(df_check) >= 14:
+                start_days_used = w
+                break
+        except Exception:
+            continue
+            
+    if raw_df.empty:
+         raise ValueError(
+            f"Could not fetch enough history (need 14+ rows) for city '{city}' even after trying windows {windows_to_try}."
+        )
+
+    # Calculate Last Date / Target Date
     noaa_last_date: Optional[str] = None
     target_date: Optional[str] = None
     if not raw_df.empty and "date" in raw_df.columns:
@@ -469,27 +561,33 @@ def run_city_forecast(city: str, days: int = 30, save_model: bool = True) -> For
 
     if len(df_feat) < 10:
         raise ValueError(
-            f"Not enough usable rows after feature building: {len(df_feat)}. Try days=90."
+            f"Not enough usable rows after feature building: {len(df_feat)}. History fetch likely failed."
         )
 
-    parquet_path = DATA_DIR / f"{city.lower().replace(' ', '_')}_{days}d_daily.parquet"
+    parquet_path = DATA_DIR / f"{city.lower().replace(' ', '_')}_{start_days_used}d_daily.parquet"
     raw_df.to_parquet(parquet_path, index=False)
 
     model, mae_c, rows_train, rows_test = train_and_evaluate(df_feat)
-    pred_c = predict_next_day_avg_temp(model, df_feat)
-    pred_f = c_to_f(pred_c)
+    
+    # 1-Day Prediction (Legacy)
+    pred_c_1d = predict_next_day_avg_temp(model, df_feat)
+    pred_f_1d = c_to_f(pred_c_1d)
+
+    # 7-Day Prediction (New)
+    dates_7d, preds_c_7d = predict_next_7_days(model, df_feat)
+    preds_f_7d = [c_to_f(c) for c in preds_c_7d]
 
     if save_model and joblib is not None:
-        model_path = MODEL_DIR / f"{city.lower().replace(' ', '_')}_{days}d_linreg.joblib"
+        model_path = MODEL_DIR / f"{city.lower().replace(' ', '_')}_{start_days_used}d_linreg.joblib"
         joblib.dump(model, model_path)
 
     return ForecastResult(
         city=city,
-        days_used=days,
+        days_used=start_days_used,
         station_id=station_id,
         station_name=station_name,
-        predicted_avg_temp_c=pred_c,
-        predicted_avg_temp_f=pred_f,
+        predicted_avg_temp_c=pred_c_1d,
+        predicted_avg_temp_f=pred_f_1d,
         test_mae_c=mae_c,
         rows_total=len(df_feat),
         rows_train=rows_train,
@@ -497,6 +595,9 @@ def run_city_forecast(city: str, days: int = 30, save_model: bool = True) -> For
         parquet_path=str(parquet_path),
         noaa_last_date=noaa_last_date,
         target_date=target_date,
+        dates_7d=dates_7d,
+        predicted_temp_c_7d=preds_c_7d,
+        predicted_temp_f_7d=preds_f_7d
     )
 
 

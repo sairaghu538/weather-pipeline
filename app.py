@@ -299,6 +299,8 @@ def cached_noaa_forecast(city_query: str, days: int) -> dict[str, Any]:
         "parquet_path": str(res.parquet_path),
         "noaa_last_date": res.noaa_last_date,
         "target_date": res.target_date,
+        "dates_7d": res.dates_7d,
+        "predicted_temp_c_7d": res.predicted_temp_c_7d,
     }
 
 
@@ -444,6 +446,10 @@ with tab_daily:
                         ml_pred_c = ml_out["predicted_avg_temp_c"]
                         target_date = ml_out.get("target_date")
                         
+                        # NEW: 7-Day Extraction
+                        avg_7d_c = ml_out.get("predicted_temp_c_7d")
+                        dates_7d = ml_out.get("dates_7d")
+                        
                         # Open-Meteo Reference
                         om_ref = {"tmean_c": None}
                         if city_lat and target_date:
@@ -475,25 +481,70 @@ with tab_daily:
                             <div class="glass-card">
                                 <div style="display: flex; justify-content: space-between; align-items: start;">
                                     <div>
-                                        <div class="metric-label">Next Day Forecast ({target_date})</div>
+                                        <div class="metric-label">Next Day Prediction ({target_date})</div>
                                         <div class="metric-value">{hero_temp}</div>
                                         <div class="metric-sub {delta_class}">{delta_msg}</div>
+                                        <div style="font-size: 0.8rem; margin-top: 5px; color: #94A3B8;">Model: Recursive Linear Regression</div>
                                     </div>
                                     <div style="text-align: right;">
-                                        <div class="metric-label">Model Accuracy (MAE)</div>
+                                        <div class="metric-label">Model Error (MAE)</div>
                                         <div style="font-size: 1.5rem; font-weight: 600; color: #CBD5E1;">
                                             {ml_out['test_mae_c']:.2f} °C
                                         </div>
-                                        <div class="metric-sub">trained on {ml_out['days_used']} days</div>
+                                        <div class="metric-sub">trained on {ml_out['days_used']} historical days</div>
                                     </div>
                                 </div>
-                                <div style="margin-top: 1rem; font-size: 0.75rem; color: #64748B;">
-                                    Station: {ml_out['station_name']} | Last Obs: {ml_out['noaa_last_date']}
-                                </div>
                             </div>
-                            <br>
                             """,
                             unsafe_allow_html=True
+                        )
+                        
+                        # NEW: 7-Day Forecast Visualization
+                        if avg_7d_c and dates_7d:
+                             st.markdown("#### 📅 7-Day Forecast Trend")
+                             
+                             # DataFrame construction
+                             df_7d = pd.DataFrame({"Date": dates_7d, "Avg Temp (C)": avg_7d_c})
+                             df_7d["Date"] = pd.to_datetime(df_7d["Date"])
+                             
+                             # Formatting columns
+                             if temp_unit == "°F":
+                                 df_7d["Avg Temp"] = df_7d["Avg Temp (C)"].apply(lambda x: c_to_f(x))
+                                 unit_label = "°F"
+                             elif temp_unit == "°C":
+                                 df_7d["Avg Temp"] = df_7d["Avg Temp (C)"]
+                                 unit_label = "°C"
+                             else:
+                                 df_7d["Avg Temp"] = df_7d["Avg Temp (C)"]
+                                 unit_label = "°C"
+                             
+                             # Line Chart
+                             chart_7d = alt.Chart(df_7d).mark_line(
+                                 point=True, 
+                                 strokeWidth=3,
+                                 color="#FACC15" # Yellow-ish for forecast
+                             ).encode(
+                                 x=alt.X("Date:T", axis=alt.Axis(format="%b %d", title=None)),
+                                 y=alt.Y("Avg Temp:Q", axis=alt.Axis(title=None)),
+                                 tooltip=["Date:T", alt.Tooltip("Avg Temp:Q", format=".1f", title=f"Temp ({unit_label})")]
+                             ).configure_view(strokeWidth=0).properties(height=200)
+                             
+                             st.altair_chart(chart_7d, use_container_width=True)
+                             
+                             with st.expander("View 7-Day Forecast Table"):
+                                 # Formatting for display
+                                 df_disp = df_7d.copy()
+                                 df_disp["Date"] = df_disp["Date"].dt.strftime("%Y-%m-%d")
+                                 df_disp[f"Temp ({unit_label})"] = df_disp["Avg Temp"].map("{:.1f}".format)
+                                 st.dataframe(df_disp[["Date", f"Temp ({unit_label})"]], use_container_width=True)
+
+                        st.markdown(
+                             f"""
+                            <div style="font-size: 0.75rem; color: #64748B; margin-top: 10px;">
+                                Station: {ml_out['station_name']} | Last Observation: {ml_out['noaa_last_date']}
+                            </div>
+                             """,
+                            unsafe_allow_html=True 
                         )
 
                     except Exception as e:
