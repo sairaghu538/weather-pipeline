@@ -46,10 +46,13 @@ A dedicated "Control Room" tab provides deep visibility into the backend process
     - Wind Patterns (Area/Line Charts)
 - **Dynamic Filtering**: Instant city search with geocoding and history.
 
-### 🤖 3. Hybrid ML Forecasting
-- **Proprietary Model**: Trains a light-weight regression model on 30/90/365 days of historical data from NOAA GHCN stations.
-- **Model vs API Comparison**: Benchmarks the custom ML prediction against Open-Meteo's forecast to surface divergences.
-- **Transparent Accuracy**: Displays Mean Absolute Error (MAE) and training metadata for every prediction.
+### 🤖 3. ML Model Workbench (NEW)
+Turn the dashboard into a data science playground with dynamic model selection:
+- **Algorithms**: Switch between **Linear Regression**, **Random Forest**, and **Ridge Regression** on the fly.
+- **Recursive Forecasting**: Implements a 7-day recursive strategy (predicting t+1, using it for t+2, etc.).
+- **Validation**:
+  - **MAE Tracking**: Real-time error metrics on training splits.
+  - **Ground Truth Verified**: Random Forest model validated against live Google Weather data (Error < 2°F).
 
 ---
 
@@ -84,7 +87,7 @@ graph LR
 ```
 
 1.  **Batch Ingest**: Fetches raw hourly weather data on-demand (Open-Meteo).
-2.  **Streaming Ingest**: Kafka producer polls 50 US cities every 60 seconds.
+2.  **Streaming Ingest**: Kafka producer polls 100 US cities every 15 minutes.
 3.  **Transform**: Cleanses data, handles type casting, and standardizes timestamps.
 4.  **Store**: Saves artifacts as optimized **Parquet** files.
 5.  **Serve**: Streamlit loads both batch and streamed data for visualization.
@@ -184,6 +187,7 @@ producer = KafkaProducer(
 - **Visualization**: Altair (Declarative Statistical Visualization)
 - **App Framework**: Streamlit (with Custom CSS/Glassmorphism)
 - **External APIs**: Open-Meteo (Weather), NOAA GHCN (ML Training)
+- **ML Libraries**: Scikit-Learn (Linear Model, Ensemble Methods)
 
 ---
 
@@ -234,7 +238,7 @@ producer = KafkaProducer(
 ├── streaming/               # Kafka Streaming Pipeline
 │   ├── producer.py          # Multi-city Kafka producer
 │   ├── consumer.py          # Kafka to Parquet consumer
-│   └── cities.json          # 50 US cities with coordinates
+│   └── cities.json          # 100 US cities with coordinates
 ├── kafka_native/            # Kafka installation & scripts
 │   ├── setup_kafka.ps1      # Kafka setup script
 │   └── kafka/               # Kafka binaries
@@ -243,5 +247,8 @@ producer = KafkaProducer(
 │   ├── curated/             # Batch Parquet Tables
 │   └── streamed/            # Kafka-streamed Parquet
 ├── .streamlit/              # App theming
+├── ui/                      # Modular Frontend
+│   ├── styles.py            # Glassmorphism CSS
+│   └── components.py        # Reusable UI Widgets
 └── requirements.txt         # Python dependencies
 ```
