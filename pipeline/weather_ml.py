@@ -9,7 +9,8 @@ import pandas as pd
 import requests
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, Ridge
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error
 
 try:
@@ -401,9 +402,10 @@ def time_series_split(df: pd.DataFrame, train_ratio: float = 0.8) -> Tuple[pd.Da
     return train_df, test_df
 
 
-def train_and_evaluate(df_feat: pd.DataFrame) -> Tuple[LinearRegression, Optional[float], int, int]:
+def train_and_evaluate(df_feat: pd.DataFrame, model_type: str = "LinearRegression") -> Tuple[Any, Optional[float], int, int]:
     """
-    Train Linear Regression and compute MAE on the last chunk (time-aware split).
+    Train a model and compute MAE on the last chunk (time-aware split).
+    Supported model_types: "LinearRegression", "RandomForest", "Ridge"
     """
     feature_cols = [
         "avg_temp_c_lag1",
@@ -421,7 +423,13 @@ def train_and_evaluate(df_feat: pd.DataFrame) -> Tuple[LinearRegression, Optiona
     X_train = train_df[feature_cols]
     y_train = train_df["target_avg_temp_c"]
 
-    model = LinearRegression()
+    if model_type == "RandomForest":
+        model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+    elif model_type == "Ridge":
+        model = Ridge(alpha=1.0)
+    else:
+        model = LinearRegression()
+
     model.fit(X_train, y_train)
 
     mae = None
@@ -434,7 +442,7 @@ def train_and_evaluate(df_feat: pd.DataFrame) -> Tuple[LinearRegression, Optiona
     return model, mae, len(train_df), len(test_df)
 
 
-def predict_next_day_avg_temp(model: LinearRegression, df_feat: pd.DataFrame) -> float:
+def predict_next_day_avg_temp(model: Any, df_feat: pd.DataFrame) -> float:
     """
     Predict next day avg temp using the most recent feature row.
     """
@@ -454,7 +462,7 @@ def predict_next_day_avg_temp(model: LinearRegression, df_feat: pd.DataFrame) ->
     return pred_c
 
 
-def predict_next_7_days(model: LinearRegression, df_feat: pd.DataFrame) -> Tuple[List[str], List[float]]:
+def predict_next_7_days(model: Any, df_feat: pd.DataFrame) -> Tuple[List[str], List[float]]:
     """
     Predict next 7 days using recursive regression.
     Predict t+1, assume it's true, use it to predict t+2, etc.
@@ -515,7 +523,7 @@ def predict_next_7_days(model: LinearRegression, df_feat: pd.DataFrame) -> Tuple
     return future_dates, predictions_c
 
 
-def run_city_forecast(city: str, days: int = 365, save_model: bool = True) -> ForecastResult:
+def run_city_forecast(city: str, days: int = 365, model_type: str = "LinearRegression", save_model: bool = True) -> ForecastResult:
     """
     Orchestrates grabbing data and running the forecast.
     Attempts multiple windows (days, 365, 180, 90) to ensure we find enough data.
@@ -567,7 +575,7 @@ def run_city_forecast(city: str, days: int = 365, save_model: bool = True) -> Fo
     parquet_path = DATA_DIR / f"{city.lower().replace(' ', '_')}_{start_days_used}d_daily.parquet"
     raw_df.to_parquet(parquet_path, index=False)
 
-    model, mae_c, rows_train, rows_test = train_and_evaluate(df_feat)
+    model, mae_c, rows_train, rows_test = train_and_evaluate(df_feat, model_type=model_type)
     
     # 1-Day Prediction (Legacy)
     pred_c_1d = predict_next_day_avg_temp(model, df_feat)

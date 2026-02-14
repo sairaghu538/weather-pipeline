@@ -283,8 +283,8 @@ def _parse_ymd(x: Any) -> date | None:
 # NOAA ML cache wrapper
 # ----------------------------
 @st.cache_data(ttl=24 * 60 * 60)
-def cached_noaa_forecast(city_query: str, days: int) -> dict[str, Any]:
-    res = run_city_forecast(city_query, days=days, save_model=False)
+def cached_noaa_forecast(city_query: str, days: int, model_type: str = "LinearRegression") -> dict[str, Any]:
+    res = run_city_forecast(city_query, days=days, model_type=model_type, save_model=False)
     return {
         "city": res.city,
         "days_used": res.days_used,
@@ -301,6 +301,7 @@ def cached_noaa_forecast(city_query: str, days: int) -> dict[str, Any]:
         "target_date": res.target_date,
         "dates_7d": res.dates_7d,
         "predicted_temp_c_7d": res.predicted_temp_c_7d,
+        "model_type": model_type,
     }
 
 
@@ -323,6 +324,7 @@ with st.sidebar:
     )
 
     st.subheader("Forecast Model")
+    ml_type = st.selectbox("Model Architecture", options=["LinearRegression", "RandomForest", "Ridge"], index=0)
     ml_days = st.selectbox("Training Window (Days)", options=[30, 90, 365], index=0)
     ml_auto_run = st.checkbox("Auto-run ML on city select", value=True)
 
@@ -438,9 +440,9 @@ with tab_daily:
             run_ml = ml_auto_run or st.button("Run Forecast Model", key="ml_run_btn")
             
             if run_ml:
-                with st.spinner("Running NOAA ML Model..."):
+                with st.spinner(f"Running NOAA ML Model ({ml_type})..."):
                     try:
-                        ml_out = cached_noaa_forecast(noaa_city_query, ml_days)
+                        ml_out = cached_noaa_forecast(noaa_city_query, ml_days, ml_type)
                         
                         # Data Extraction
                         ml_pred_c = ml_out["predicted_avg_temp_c"]
@@ -484,7 +486,7 @@ with tab_daily:
                                         <div class="metric-label">Next Day Prediction ({target_date})</div>
                                         <div class="metric-value">{hero_temp}</div>
                                         <div class="metric-sub {delta_class}">{delta_msg}</div>
-                                        <div style="font-size: 0.8rem; margin-top: 5px; color: #94A3B8;">Model: Recursive Linear Regression</div>
+                                        <div style="font-size: 0.8rem; margin-top: 5px; color: #94A3B8;">Model: Recursive {ml_out['model_type']}</div>
                                     </div>
                                     <div style="text-align: right;">
                                         <div class="metric-label">Model Error (MAE)</div>
